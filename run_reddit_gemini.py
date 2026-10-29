@@ -811,6 +811,14 @@ def step4_assemble(variant: str) -> None:
 def run_variant(variant: str, skip_fetch: bool, stats: dict | None = None) -> bool:
     spec = VARIANTS[variant]
     st = stats.setdefault(variant, {}) if stats is not None else {}
+    # GitHub Actions (2026-10-29): a rerun restores today's reports first, so a
+    # variant already made today is skipped before its ~10-25 min of fetching.
+    if os.environ.get("REDDIT_SKIP_DONE") == "1":
+        date_str = dt.datetime.now(JST).strftime("%Y-%m-%d")
+        if glob.glob(str(REPORT_DIR / spec["dedup_glob"].format(date=date_str))):
+            log(spec["label"], "today's report already exists — skipping (REDDIT_SKIP_DONE)")
+            st["skipped"] = True
+            return True
     try:
         data_file = CACHE / spec["data"]
         if not skip_fetch:
@@ -998,6 +1006,11 @@ def main() -> int:
             # 先に送る: AI・セミナーの約 20 分を待たずに、6:10 ごろ GitHub が公開を始められる
             push_note_to_github(stats)
     ok = all(results)
+    # On GitHub Actions a failed hand-over of the note manuscript must fail the
+    # run, so the retry (or the clock) sends it again instead of nobody noticing.
+    if os.environ.get("REDDIT_REQUIRE_PUSH") == "1" and stats.get("standard", {}).get("note_pushed") is False:
+        log("gemini-std", "ERROR: note 原稿を GitHub へ渡せなかったので、この回を失敗にします")
+        ok = False
 
     # Gemini の使用量を cron.log と usage/ の両方へ残す（2026-09-10 追加）
     log("usage", meter.summary_line())

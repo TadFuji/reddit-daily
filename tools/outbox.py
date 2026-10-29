@@ -1,7 +1,9 @@
 """Hand the day's Reddit files to the private news-outbox repo (and back).
 
-  python tools/outbox.py restore DAY DIR   # put the day's .md files back into DIR
-  python tools/outbox.py upload  DAY DIR   # send the day's files from DIR
+  python tools/outbox.py restore DAY DIR          # put the day's .md files back into DIR
+  python tools/outbox.py upload  DAY DIR          # send the day's files from DIR
+  python tools/outbox.py health-restore DAY DIR   # this month's health history into DIR
+  python tools/outbox.py health-upload  DAY DIR   # and back
 
 Text files go to news-outbox as reddit/DAY/<name> (git keeps them small).
 Images go to a release "reddit-DAY" (keeping MBs of PNG out of git history);
@@ -30,6 +32,11 @@ REPO = os.environ.get("OUTBOX_REPO", "TadFuji/news-outbox")
 PREFIX = os.environ.get("OUTBOX_PREFIX", "reddit")
 TEXT_SUFFIXES = {".md", ".json", ".jsonl"}
 IMAGE_SUFFIXES = {".png", ".jpg"}
+
+
+def transient_notes(day: str) -> set[str]:
+    """Notes that only describe a failed attempt; a later success must remove them."""
+    return {f"reddit-failed-{day}.md", f"⚠️ 自動処理の異常-reddit-{day}.md"}
 
 
 def _request(method, url, token, body=None, data=None, content_type="application/json", accept="application/vnd.github+json"):
@@ -76,7 +83,7 @@ def restore(day: str, out: pathlib.Path, token: str, request=_request) -> list[s
     out.mkdir(parents=True, exist_ok=True)
     for entry in json.loads(raw):
         name = entry["name"]
-        if pathlib.Path(name).suffix != ".md" or (out / name).exists():
+        if pathlib.Path(name).suffix != ".md" or (out / name).exists() or name in transient_notes(day):
             continue
         s, body = request("GET", f"{API}/repos/{REPO}/contents/{_path(PREFIX, day, name)}", token,
                           accept="application/vnd.github.raw")
@@ -149,11 +156,56 @@ def upload(day: str, src: pathlib.Path, token: str, request=_request) -> list[st
     for p in files:
         if p.suffix in TEXT_SUFFIXES:
             done.append(f"{p.name}: {_put_text(day, p.name, p.read_bytes(), token, request)}")
+    # A failure note from an earlier attempt that this run no longer has: remove it.
+    for name in transient_notes(day):
+        if (src / name).exists():
+            continue
+        url = f"{API}/repos/{REPO}/contents/{_path(PREFIX, day, name)}"
+        s, raw = request("GET", url, token)
+        if s == 200:
+            sha = json.loads(raw)["sha"]
+            s, _ = request("DELETE", url, token, body={"message": f"{PREFIX} {day}: {name} (resolved)", "sha": sha})
+            done.append(f"{name}: {'removed' if s == 200 else f'remove failed HTTP {s}'}")
     return done
 
 
+def _health_file(day: str) -> str:
+    return f"health-{day[:7]}.jsonl"
+
+
+def health_restore(day: str, d: pathlib.Path, token: str, request=_request) -> list[str]:
+    """Bring this month's health history back so the checks can compare with past runs."""
+    name = _health_file(day)
+    s, body = request("GET", f"{API}/repos/{REPO}/contents/{_path(PREFIX, 'health', name)}", token,
+                      accept="application/vnd.github.raw")
+    if s == 404:
+        return []
+    if s != 200:
+        raise RuntimeError(f"健康チェックの履歴を読めません（HTTP {s}）")
+    d.mkdir(parents=True, exist_ok=True)
+    (d / name).write_bytes(body)
+    return [name]
+
+
+def health_upload(day: str, d: pathlib.Path, token: str, request=_request) -> list[str]:
+    name = _health_file(day)
+    if not (d / name).exists():
+        return []
+    url = f"{API}/repos/{REPO}/contents/{_path(PREFIX, 'health', name)}"
+    s, raw = request("GET", url, token)
+    sha = json.loads(raw)["sha"] if s == 200 else None
+    body = {"message": f"{PREFIX} health {day}", "content": base64.b64encode((d / name).read_bytes()).decode()}
+    if sha:
+        body["sha"] = sha
+    s, _ = request("PUT", url, token, body=body)
+    if s not in (200, 201):
+        raise RuntimeError(f"健康チェックの履歴を書き込めません（HTTP {s}）")
+    return [name]
+
+
 def main() -> int:
-    if len(sys.argv) != 4 or sys.argv[1] not in ("restore", "upload"):
+    cmds = {"restore": restore, "upload": upload, "health-restore": health_restore, "health-upload": health_upload}
+    if len(sys.argv) != 4 or sys.argv[1] not in cmds:
         print(__doc__)
         return 2
     cmd, day, d = sys.argv[1], sys.argv[2], pathlib.Path(sys.argv[3])
@@ -162,7 +214,7 @@ def main() -> int:
         print("ERROR: OUTBOX_TOKEN がありません")
         return 1
     try:
-        result = restore(day, d, token) if cmd == "restore" else upload(day, d, token)
+        result = cmds[cmd](day, d, token)
     except RuntimeError as e:
         print(f"ERROR: {e}")
         return 1

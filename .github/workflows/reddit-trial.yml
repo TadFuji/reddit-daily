@@ -1,0 +1,16 @@
+name: Reddit trial
+# A trial run of the daily generator: no hand-over to reddit-note-drop, and the
+# files go to news-outbox under reddit-trial/. Being a separate workflow, its
+# runs never count as today's production run for the news-clock Worker.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  trial:
+    uses: ./.github/workflows/reddit-generate.yml
+    with:
+      trial: "true"
+    secrets: inherit
