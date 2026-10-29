@@ -895,7 +895,9 @@ HEALTH_LIMITS = {
     # standard は 2026-10-12 に limit=25 → 100 へ増やした（note を 30 件にするため）。
     # 要約の失敗は r/all の成人向け投稿が安全フィルタで弾かれる分を見込んで 5 まで許す。
     # note の件数は目標 30。除外が多くて候補 40 件を使い切った朝に 25 を割ると警告になる。
-    "standard": {"sources_floor": 2, "posts_floor": 60, "failed_ceiling": 5, "note_floor": 25},
+    # r/all answers 403/429 to anonymous reads since 2026-10-29 (box and GitHub
+    # alike); r/popular alone gives the usual ~99 posts. One source now.
+    "standard": {"sources_floor": 1, "posts_floor": 60, "failed_ceiling": 5, "note_floor": 25},
     "ai": {"sources_floor": 10, "posts_floor": 90},
     "seminar": {"sources_floor": 8, "posts_floor": 70},
 }
