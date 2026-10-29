@@ -198,7 +198,8 @@ try:
     buf = io.BytesIO(); im.save(buf, "PNG")
     out = Image.open(io.BytesIO(note_cover.crop_to_cover(buf.getvalue())))
     check("cover: bottom edge kept, top trimmed", out.getpixel((640, 669)) == (0, 0, 255))
-    check("cover: prompt asks for pixel art", "ドット絵" in note_cover.build_prompt("x"))
+    # The style is the retro silkscreen poster (decided 2026-10-29; it was pixel art before).
+    check("cover: prompt asks for a retro poster", "シルクスクリーンのポスター" in note_cover.build_prompt("x"))
 except ImportError:
     print("SKIP cover crop (Pillow not installed)")
 
