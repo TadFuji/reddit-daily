@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reddit-buzz-jp"
+version = "3.0.0"
+description = "Reddit のトレンド投稿を自動取得し、Gemini API で日本語要約レポートを生成するツール"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Tadahiro Fujikawa"}
+]
+keywords = ["reddit", "trend", "gemini", "llm", "obsidian", "japanese", "markdown"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Text Processing :: Markup :: Markdown",
+]
+dependencies = [
+    "defusedxml>=0.7.1",
+    "google-genai",
+    "pillow",
+]
+
+[project.urls]
+Homepage = "https://github.com/TadFuji/reddit-buzz-jp"
+Repository = "https://github.com/TadFuji/reddit-buzz-jp"
+Issues = "https://github.com/TadFuji/reddit-buzz-jp/issues"
+Changelog = "https://github.com/TadFuji/reddit-buzz-jp/blob/main/CHANGELOG.md"

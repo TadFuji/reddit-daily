@@ -1,0 +1,116 @@
+name: Reddit generate
+# Started by the news-clock Worker (6:00 JST) or by hand. Makes the three daily
+# reports, hands the note manuscript to reddit-note-drop (the clock then starts
+# reddit-note.yml on Hacker-News) and keeps every file in news-outbox for the
+# Mac to put into Obsidian. trial=true makes everything under "reddit-trial"
+# and touches neither reddit-note-drop nor the real outbox folder.
+on:
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "YYYY-MM-DD (must be today JST; default today)"
+        required: false
+      trial:
+        description: "true = trial run: no hand-over, outbox under reddit-trial/"
+        required: false
+        default: "false"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reddit-generate
+  cancel-in-progress: false
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    # Three attempts of up to 60 min, 10 min apart (the box's run_prod.sh), plus setup.
+    timeout-minutes: 215
+    env:
+      TZ: Asia/Tokyo
+      PYTHONUTF8: "1"
+      REDDIT_OUT_DIR: ${{ github.workspace }}/out
+      HEALTHCHECK_DIR: ${{ runner.temp }}/health
+      USAGE_LOG_DIR: ${{ runner.temp }}/usage
+      OUTBOX_TOKEN: ${{ secrets.OUTBOX_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Decide the day and mode
+        id: day
+        env:
+          IN_DATE: ${{ inputs.date }}
+          IN_TRIAL: ${{ inputs.trial }}
+        run: |
+          today=$(date +%F)
+          day="${IN_DATE:-$today}"
+          if [ "$day" != "$today" ]; then echo "::error::date must be today JST ($today), got $day"; exit 1; fi
+          if [ "$IN_TRIAL" = "true" ]; then
+            echo "prefix=reddit-trial" >> "$GITHUB_OUTPUT"; echo "push=0" >> "$GITHUB_OUTPUT"
+          else
+            echo "prefix=reddit" >> "$GITHUB_OUTPUT"; echo "push=1" >> "$GITHUB_OUTPUT"
+          fi
+          echo "day=$day" >> "$GITHUB_OUTPUT"
+          mkdir -p "$REDDIT_OUT_DIR"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Self-check (offline)
+        run: |
+          python test_push_note_github.py
+          python test_note_article.py
+          python test_x_article.py
+          python tools/test_outbox.py
+
+      - name: Restore today's reports from news-outbox
+        env:
+          OUTBOX_PREFIX: ${{ steps.day.outputs.prefix }}
+          DAY: ${{ steps.day.outputs.day }}
+        run: python tools/outbox.py restore "$DAY" "$REDDIT_OUT_DIR"
+
+      - name: Generate Reddit reports
+        id: gen
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_IMAGE_API_KEY: ${{ secrets.GEMINI_IMAGE_API_KEY }}
+          DROP_TOKEN: ${{ secrets.DROP_TOKEN }}
+          NOTE_GITHUB_PUSH: ${{ steps.day.outputs.push }}
+          NOTE_DISPATCH: "0"
+        run: |
+          drop="$RUNNER_TEMP/drop-token"
+          ( umask 077; printf '%s' "$DROP_TOKEN" > "$drop" )
+          export REDDIT_DROP_TOKEN_FILE="$drop"
+          ok=0
+          for attempt in 1 2 3; do
+            if timeout -k 60 3600 python run_reddit_gemini.py all; then ok=1; break; fi
+            echo "::warning::attempt $attempt failed"
+            [ "$attempt" -lt 3 ] && sleep 600
+          done
+          rm -f "$drop"
+          if [ "$ok" != 1 ]; then
+            { cat failure_note.md 2>/dev/null; echo; echo "reason: run_reddit_gemini.py failed 3 times on GitHub Actions (run $GITHUB_RUN_ID)"; } \
+              > "$REDDIT_OUT_DIR/reddit-failed-$(date +%F).md"
+            echo "failed=1" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Keep the day's files in news-outbox
+        if: always() && steps.day.outputs.day != ''
+        env:
+          OUTBOX_PREFIX: ${{ steps.day.outputs.prefix }}
+          DAY: ${{ steps.day.outputs.day }}
+        run: |
+          for d in "$HEALTHCHECK_DIR" "$USAGE_LOG_DIR"; do
+            [ -d "$d" ] && for f in "$d"/*; do [ -f "$f" ] && cp "$f" "$REDDIT_OUT_DIR/$DAY-$(basename "$f")"; done
+          done
+          python tools/outbox.py upload "$DAY" "$REDDIT_OUT_DIR"
+
+      - name: Fail the run when generation failed
+        if: steps.gen.outputs.failed == '1'
+        run: |
+          echo "::error::Reddit generation failed 3 times"
+          exit 1

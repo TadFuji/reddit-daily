@@ -1,0 +1,18 @@
+{
+  "reddit_sources": [
+    "https://www.reddit.com/r/artificial/top.json?t=day&limit=25",
+    "https://www.reddit.com/r/MachineLearning/top.json?t=day&limit=25",
+    "https://www.reddit.com/r/ChatGPT/top.json?t=day&limit=25",
+    "https://www.reddit.com/r/LocalLLaMA/top.json?t=day&limit=25",
+    "https://www.reddit.com/r/OpenAI/top.json?t=day&limit=25",
+    "https://www.reddit.com/r/singularity/top.json?t=day&limit=25",
+    "https://www.reddit.com/r/StableDiffusion/top.json?t=day&limit=25",
+    "https://www.reddit.com/r/ClaudeAI/top.json?t=day&limit=25",
+    "https://www.reddit.com/r/midjourney/top.json?t=day&limit=25",
+    "https://www.reddit.com/r/comfyui/top.json?t=day&limit=25",
+    "https://www.reddit.com/r/deeplearning/top.json?t=day&limit=25",
+    "https://www.reddit.com/r/Bard/top.json?t=day&limit=25"
+  ],
+  "top_n": 30,
+  "blocked_subreddits": []
+}

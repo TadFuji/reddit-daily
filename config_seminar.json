@@ -1,0 +1,16 @@
+{
+  "reddit_sources": [
+    "https://www.reddit.com/r/MachineLearning/top.json?t=day&limit=25",
+    "https://www.reddit.com/r/LocalLLaMA/top.json?t=day&limit=25",
+    "https://www.reddit.com/r/artificial/top.json?t=day&limit=25",
+    "https://www.reddit.com/r/deeplearning/top.json?t=day&limit=25",
+    "https://www.reddit.com/r/StableDiffusion/top.json?t=day&limit=25",
+    "https://www.reddit.com/r/comfyui/top.json?t=day&limit=25",
+    "https://www.reddit.com/r/ollama/top.json?t=day&limit=25",
+    "https://www.reddit.com/r/LangChain/top.json?t=day&limit=25",
+    "https://www.reddit.com/r/Oobabooga/top.json?t=day&limit=25",
+    "https://www.reddit.com/r/datascience/top.json?t=day&limit=25"
+  ],
+  "top_n": 20,
+  "blocked_subreddits": []
+}

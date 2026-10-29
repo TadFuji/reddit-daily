@@ -1,0 +1,9 @@
+{
+  "reddit_sources": [
+    "https://www.reddit.com/r/popular/top.json?t=day&limit=100",
+    "https://www.reddit.com/r/all/top.json?t=day&limit=100"
+  ],
+  "top_n": 40,
+  "note_target": 30,
+  "blocked_subreddits": []
+}
