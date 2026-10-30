@@ -2,14 +2,39 @@ name: Reddit trial
 # A trial run of the daily generator: no hand-over to reddit-note-drop, and the
 # files go to news-outbox under reddit-trial/. Being a separate workflow, its
 # runs never count as today's production run for the news-clock Worker.
+# Before the cut-over it also runs once a day by itself, to see over several
+# mornings that it fits in time and is not refused by Reddit. The gate below
+# ends the daily runs on its own after LAST_DAY.
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "17 1 * * *" # 10:17 JST, well after the box's morning run
 
 permissions:
   contents: read
 
 jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+    steps:
+      - id: check
+        env:
+          EVENT: ${{ github.event_name }}
+          LAST_DAY: "2026-11-03"
+        run: |
+          today=$(TZ=Asia/Tokyo date +%F)
+          if [ "$EVENT" != "schedule" ] || [[ ! "$today" > "$LAST_DAY" ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Daily trials ended after $LAST_DAY; nothing to do."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
   trial:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
     uses: ./.github/workflows/reddit-generate.yml
     with:
       trial: "true"
