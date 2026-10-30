@@ -5,7 +5,7 @@ Reddit の話題を日本語でまとめる 3 本のレポート（標準・AI�
 - 起動：時刻係（Cloudflare の `news-clock`）が毎朝 6:00 ごろに `reddit-generate.yml` を起動します。手で起動することもできます。
 - 公開：できた note 原稿を `TadFuji/reddit-note-drop` に置きます。note への公開は、時刻係が別のワークフローを起動して行います。
 - 保管：できたファイルは非公開の `TadFuji/news-outbox` に置き、Mac が起きているときに Obsidian へ取り込みます。
-- 試験：`reddit-trial.yml` を起動すると、受け渡しをせず、保管先も `reddit-trial/` に分けます。本番の記録とは別のワークフローとして残るので、時刻係の判断に混ざりません。
+- 試験：`reddit-trial.yml` を起動すると、受け渡しをせず、保管先も `reddit-trial/` に分けます。本番の記録とは別のワークフローとして残るので、時刻係の判断に混ざりません。切り替え前の確認のため、2026-10-31〜11-03 は毎日 10:17（日本時間）に自動でも動きます（11/4 からは自動では何もしません）。この期間は、同じ日に手で起動しないでください（その日の自動の回が何もせずに終わります）。
 
 鍵（GitHub の Secrets）：`GEMINI_API_KEY`、`GEMINI_IMAGE_API_KEY`、`DROP_TOKEN`（reddit-note-drop の書き込み）、`OUTBOX_TOKEN`（news-outbox の書き込み）。
 
