@@ -5,3 +5,6 @@ out/
 health/
 usage/
 *.pyc
+
+# Claude Code personal permission rules (may contain secrets)
+.claude/settings.local.json
