@@ -49,7 +49,7 @@ def load_model() -> str:
     try:
         return json.loads((BASE / ".cache/gemini_meta.json").read_text(encoding="utf-8"))["model"]
     except Exception:
-        return "gemini-3.8-flash"
+        return "gemini-4-hydrogen"
 
 
 def main():

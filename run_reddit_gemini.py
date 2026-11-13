@@ -101,8 +101,9 @@ JST = dt.timezone(dt.timedelta(hours=9), name="JST")
 # 2026-07-28 藤川さんの指示で 3.6-flash へ変更（旧: gemini-3.1-flash-lite）。GEMINI_MODEL で上書き可。
 # 2026-08-14 後継の 3.7-flash へ更新（API のモデル一覧で提供を確認済み）。
 # 2026-09-08 後継の 3.8-flash へ更新（公式ドキュメントで GA 提供を確認）。旧 3.7 を先頭のフォールバックに残す。
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
-GEMINI_FALLBACK_CANDIDATES = ["gemini-3.7-flash", "gemini-3.6-flash"]
+# 2026-11-13 藤川さんの指示で gemini-4-hydrogen へ更新（API のモデル一覧で提供を確認済み）。旧 3.8 を先頭のフォールバックに残す。
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-4-hydrogen")
+GEMINI_FALLBACK_CANDIDATES = ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash"]
 MAX_CALL_RETRIES = 3
 
 VARIANTS = {
