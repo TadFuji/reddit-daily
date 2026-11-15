@@ -70,6 +70,7 @@ jobs:
           python test_push_note_github.py
           python test_note_article.py
           python test_x_article.py
+          python test_healthcheck.py
           python tools/test_outbox.py
 
       - name: Restore today's reports and the health history from news-outbox

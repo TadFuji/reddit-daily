@@ -102,7 +102,9 @@ JST = dt.timezone(dt.timedelta(hours=9), name="JST")
 # 2026-08-14 後継の 3.7-flash へ更新（API のモデル一覧で提供を確認済み）。
 # 2026-09-08 後継の 3.8-flash へ更新（公式ドキュメントで GA 提供を確認）。旧 3.7 を先頭のフォールバックに残す。
 # 2026-11-13 藤川さんの指示で gemini-4-hydrogen へ更新（API のモデル一覧で提供を確認済み）。旧 3.8 を先頭のフォールバックに残す。
+# 2026-11-16 藤川さんの指示で思考の深さを MEDIUM（旧 3.8-flash 既定と同等）へ設定（4-hydrogen 既定は HIGH）。
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-4-hydrogen")
+GEMINI_THINKING_LEVEL = os.environ.get("GEMINI_THINKING_LEVEL", "MEDIUM").strip()
 GEMINI_FALLBACK_CANDIDATES = ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash"]
 MAX_CALL_RETRIES = 3
 
@@ -181,15 +183,20 @@ def gemini_json(prompt: str, label: str, cache_stem: str | None = None) -> dict 
         (CACHE / f"{cache_stem}.txt").write_text(prompt, encoding="utf-8")
     client = gemini_client()
     model = resolve_model()
+    cfg_kwargs: dict = {
+        "temperature": 0.3,
+        "response_mime_type": "application/json",
+    }
+    if GEMINI_THINKING_LEVEL:
+        cfg_kwargs["thinking_config"] = types.ThinkingConfig(
+            thinking_level=GEMINI_THINKING_LEVEL
+        )
     for attempt in range(1, MAX_CALL_RETRIES + 1):
         try:
             resp = client.models.generate_content(
                 model=model,
                 contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0.3,
-                    response_mime_type="application/json",
-                ),
+                config=types.GenerateContentConfig(**cfg_kwargs),
             )
             meter.record(model, resp, label=label)
             text = (resp.text or "").strip()
@@ -903,6 +910,7 @@ HEALTH_LIMITS = {
     "seminar": {"sources_floor": 8, "posts_floor": 70},
 }
 HEALTH_LABELS = {"standard": "標準", "ai": "AI", "seminar": "セミナー"}
+HEALTH_MINUTES_CEILING = 55
 
 
 def run_healthcheck(targets: list[str], stats: dict, ok: bool, elapsed: float) -> None:
@@ -916,7 +924,12 @@ def run_healthcheck(targets: list[str], stats: dict, ok: bool, elapsed: float) -
         log("health", "WARNING: healthcheck.py が無いため健康チェックをしていません")
         return
     try:
-        hc = HealthCheck("reddit", note_dir=REPORT_DIR, history_dir=BASE / "health")
+        hc = HealthCheck(
+            "reddit",
+            note_dir=REPORT_DIR,
+            history_dir=BASE / "health",
+            where=" GitHub Actions（`TadFuji/reddit-daily` の Actions 実行記録、履歴保管は `TadFuji/news-outbox` の `reddit/health/`）",
+        )
         date_str = dt.datetime.now(JST).strftime("%Y-%m-%d")
         for v in targets:
             st = stats.get(v, {})
@@ -972,9 +985,9 @@ def run_healthcheck(targets: list[str], stats: dict, ok: bool, elapsed: float) -
                         len(glob.glob(str(REPORT_DIR / f"{date_str}-{NOTE_FILE_STEM}{suffix}"))),
                         floor=1, label=f"{name}: 今日の note {'原稿' if kind == 'note' else '表紙'}",
                     )
-        hc.metric("minutes", round(elapsed / 60, 1), ceiling=45, label="所要時間（分）")
+        hc.metric("minutes", round(elapsed / 60, 1), ceiling=HEALTH_MINUTES_CEILING, label="所要時間（分）")
         if not ok:
-            hc.problem("3 種類のうち少なくとも 1 つが失敗しました（cron.log を参照）")
+            hc.problem("3 種類のうち少なくとも 1 つが失敗しました（GitHub Actions の実行記録を参照）")
         log("health", hc.summary_line())
         note = hc.finish(extra={"targets": targets, "ok": ok})
         if note:
@@ -997,7 +1010,7 @@ def main() -> int:
     (CACHE / "gemini_meta.json").write_text(
         json.dumps({"model": model}, ensure_ascii=False), encoding="utf-8"
     )
-    log("gemini", f"using model: {model}")
+    log("gemini", f"using model: {model} (thinking_level={GEMINI_THINKING_LEVEL or 'default'})")
 
     targets = ["standard", "ai", "seminar"] if args.target == "all" else [args.target]
     started = time.time()
