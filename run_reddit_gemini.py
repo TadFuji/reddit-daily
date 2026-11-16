@@ -107,10 +107,13 @@ JST = dt.timezone(dt.timedelta(hours=9), name="JST")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-4-hydrogen")
 GEMINI_THINKING_LEVEL = os.environ.get("GEMINI_THINKING_LEVEL", "MEDIUM").strip()
 GEMINI_SERVICE_TIER = os.environ.get("GEMINI_SERVICE_TIER", "flex").strip().lower()
-FLEX_TIMEOUT_MS = int(os.environ.get("REDDIT_FLEX_TIMEOUT_MS", "60000"))
+FLEX_TIMEOUT_MS = int(os.environ.get("REDDIT_FLEX_TIMEOUT_MS", "35000"))
 FLEX_MAX_STREAK_FAILURES = 2
 FLEX_MAX_TOTAL_FAILURES = 4
-FLEX_DEADLINE_SECONDS = int(os.environ.get("REDDIT_FLEX_DEADLINE_SECONDS", "2400"))
+FLEX_SLOW_THRESHOLD_SECONDS = float(os.environ.get("REDDIT_FLEX_SLOW_SECONDS", "25"))
+FLEX_MAX_SLOW_STREAK = 3
+FLEX_MAX_SLOW_TOTAL = 6
+FLEX_DEADLINE_SECONDS = int(os.environ.get("REDDIT_FLEX_DEADLINE_SECONDS", "1500"))
 GEMINI_FALLBACK_CANDIDATES = ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash"]
 MAX_CALL_RETRIES = 3
 
@@ -152,6 +155,8 @@ _FLEX_STATE: dict[str, float | int | bool] = {
     "started_monotonic": time.monotonic(),
     "streak_failures": 0,
     "total_failures": 0,
+    "slow_streak": 0,
+    "slow_total": 0,
     "disabled": False,
 }
 
@@ -161,6 +166,8 @@ def reset_flex_state() -> None:
     _FLEX_STATE["started_monotonic"] = time.monotonic()
     _FLEX_STATE["streak_failures"] = 0
     _FLEX_STATE["total_failures"] = 0
+    _FLEX_STATE["slow_streak"] = 0
+    _FLEX_STATE["slow_total"] = 0
     _FLEX_STATE["disabled"] = False
 
 
@@ -229,16 +236,33 @@ def gemini_json(prompt: str, label: str, cache_stem: str | None = None) -> dict 
             cfg_kwargs["http_options"] = types.HttpOptions(timeout=FLEX_TIMEOUT_MS)
 
         api_ok = False
+        call_started = time.monotonic()
         try:
             resp = client.models.generate_content(
                 model=model,
                 contents=prompt,
                 config=types.GenerateContentConfig(**cfg_kwargs),
             )
+            call_elapsed = time.monotonic() - call_started
             api_ok = True
             meter.record(model, resp, label=label, service_tier="flex" if use_flex else None)
             if use_flex:
                 _FLEX_STATE["streak_failures"] = 0
+                if call_elapsed > FLEX_SLOW_THRESHOLD_SECONDS:
+                    _FLEX_STATE["slow_streak"] = int(_FLEX_STATE["slow_streak"]) + 1
+                    _FLEX_STATE["slow_total"] = int(_FLEX_STATE["slow_total"]) + 1
+                    if (
+                        int(_FLEX_STATE["slow_streak"]) >= FLEX_MAX_SLOW_STREAK
+                        or int(_FLEX_STATE["slow_total"]) >= FLEX_MAX_SLOW_TOTAL
+                    ):
+                        _FLEX_STATE["disabled"] = True
+                        log(
+                            label,
+                            f"Flex 推論の応答遅延（>{FLEX_SLOW_THRESHOLD_SECONDS:.0f}秒）が続いたため、"
+                            "残りの呼び出しを通常モード（Standard）へ切り替えます",
+                        )
+                else:
+                    _FLEX_STATE["slow_streak"] = 0
             text = (resp.text or "").strip()
             if not text:
                 raise ValueError("empty response (safety block?)")

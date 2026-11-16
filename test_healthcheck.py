@@ -232,11 +232,13 @@ with genai_types_context():
     check("default GEMINI_THINKING_LEVEL is MEDIUM", R.GEMINI_THINKING_LEVEL == "MEDIUM")
     check("default GEMINI_SERVICE_TIER is flex", R.GEMINI_SERVICE_TIER == "flex")
     check(
-        "gemini_json passes thinking_level=MEDIUM, service_tier=flex, 60s http_options, and bills 50%",
+        "gemini_json passes thinking_level=MEDIUM, service_tier=flex, 35s http_options, and bills 50%",
         res == {"ok": True}
         and cfg.thinking_config is not None
         and lvl_val == "MEDIUM"
         and tier_val == "flex"
+        and R.FLEX_TIMEOUT_MS == 35000
+        and R.FLEX_DEADLINE_SECONDS == 1500
         and getattr(cfg.http_options, "timeout", None) == R.FLEX_TIMEOUT_MS
         and cfg.response_mime_type == "application/json"
         and cfg.temperature == 0.3
@@ -302,6 +304,86 @@ with genai_types_context():
         res_dl == {"ok": True}
         and R._FLEX_STATE["disabled"] is True
         and getattr(fake_dl.models.configs[0], "service_tier", None) is None,
+    )
+
+    # Total failures breaker (FLEX_MAX_TOTAL_FAILURES = 4 without 2 consecutive failures)
+    R.reset_flex_state()
+    with mock.patch.object(R.time, "sleep"), \
+         mock.patch.object(R, "resolve_model", return_value="gemini-4-hydrogen"), \
+         mock.patch.object(R, "meter", mock.Mock()):
+        for step in range(3):
+            with mock.patch.object(R, "gemini_client", return_value=FakeClient(fail_first_n=1)):
+                R.gemini_json("prompt", "test")
+            with mock.patch.object(R, "gemini_client", return_value=FakeClient()):
+                R.gemini_json("prompt", "test")
+        assert R._FLEX_STATE["disabled"] is False
+        with mock.patch.object(R, "gemini_client", return_value=FakeClient(fail_first_n=1)):
+            R.gemini_json("prompt", "test")
+        fake_total_after = FakeClient()
+        with mock.patch.object(R, "gemini_client", return_value=fake_total_after):
+            R.gemini_json("prompt", "test")
+    check(
+        "FLEX_MAX_TOTAL_FAILURES=4 disables Flex even when failures are non-consecutive",
+        R._FLEX_STATE["total_failures"] == 4
+        and R._FLEX_STATE["disabled"] is True
+        and getattr(fake_total_after.models.configs[0], "service_tier", None) is None,
+    )
+
+    # Slow-success latency breaker (3 consecutive slow >25s Flex responses disable Flex)
+    class SlowFakeModels(FakeModels):
+        def __init__(self, clock_state, step_seconds: float) -> None:
+            super().__init__()
+            self.clock_state = clock_state
+            self.step_seconds = step_seconds
+
+        def generate_content(self, **kw):
+            self.clock_state["t"] += self.step_seconds
+            return super().generate_content(**kw)
+
+    class SlowFakeClient:
+        def __init__(self, clock_state, step_seconds: float) -> None:
+            self.models = SlowFakeModels(clock_state, step_seconds)
+
+    clock_streak = {"t": 0.0}
+    with mock.patch.object(R.time, "monotonic", side_effect=lambda: clock_streak["t"]), \
+         mock.patch.object(R, "resolve_model", return_value="gemini-4-hydrogen"), \
+         mock.patch.object(R, "meter", mock.Mock()):
+        R.reset_flex_state()
+        slow_client = SlowFakeClient(clock_streak, R.FLEX_SLOW_THRESHOLD_SECONDS + 1.0)
+        with mock.patch.object(R, "gemini_client", return_value=slow_client):
+            for _ in range(4):
+                R.gemini_json("prompt", "test")
+    check(
+        "Slow-success streak breaker (3 calls >25s) switches remaining calls to Standard",
+        len(slow_client.models.configs) == 4
+        and getattr(slow_client.models.configs[2], "service_tier", None) is not None
+        and getattr(slow_client.models.configs[3], "service_tier", None) is None
+        and R._FLEX_STATE["slow_streak"] == 3
+        and R._FLEX_STATE["disabled"] is True,
+    )
+
+    # Slow-success total breaker (6 non-consecutive slow calls disable Flex)
+    clock_total = {"t": 0.0}
+    with mock.patch.object(R.time, "monotonic", side_effect=lambda: clock_total["t"]), \
+         mock.patch.object(R, "resolve_model", return_value="gemini-4-hydrogen"), \
+         mock.patch.object(R, "meter", mock.Mock()):
+        R.reset_flex_state()
+        slow_c = SlowFakeClient(clock_total, R.FLEX_SLOW_THRESHOLD_SECONDS + 1.0)
+        fast_c = SlowFakeClient(clock_total, 2.0)
+        for _ in range(3):
+            with mock.patch.object(R, "gemini_client", return_value=slow_c):
+                R.gemini_json("prompt", "test")
+                R.gemini_json("prompt", "test")
+            with mock.patch.object(R, "gemini_client", return_value=fast_c):
+                R.gemini_json("prompt", "test")
+        after_slow_total = FakeClient()
+        with mock.patch.object(R, "gemini_client", return_value=after_slow_total):
+            R.gemini_json("prompt", "test")
+    check(
+        "Slow-success total breaker (6 slow calls) switches remaining calls to Standard",
+        R._FLEX_STATE["slow_total"] == 6
+        and R._FLEX_STATE["disabled"] is True
+        and getattr(after_slow_total.models.configs[0], "service_tier", None) is None,
     )
 
     # GEMINI_SERVICE_TIER="standard" disables Flex from the start
