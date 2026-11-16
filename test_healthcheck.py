@@ -156,13 +156,27 @@ def genai_types_context():
             def __init__(self, thinking_level=None):
                 self.thinking_level = thinking_level
 
+        class StubHttpOptions:
+            def __init__(self, timeout=None):
+                self.timeout = timeout
+
         class StubGenerateContentConfig:
-            def __init__(self, temperature=None, response_mime_type=None, thinking_config=None):
+            def __init__(
+                self,
+                temperature=None,
+                response_mime_type=None,
+                thinking_config=None,
+                service_tier=None,
+                http_options=None,
+            ):
                 self.temperature = temperature
                 self.response_mime_type = response_mime_type
                 self.thinking_config = thinking_config
+                self.service_tier = service_tier
+                self.http_options = http_options
 
         fake_types.ThinkingConfig = StubThinkingConfig
+        fake_types.HttpOptions = StubHttpOptions
         fake_types.GenerateContentConfig = StubGenerateContentConfig
         fake_genai.types = fake_types
         fake_google.genai = fake_genai
@@ -174,38 +188,62 @@ def genai_types_context():
 
 
 class FakeModels:
-    def __init__(self) -> None:
+    def __init__(self, fail_first_n: int = 0) -> None:
         self.configs = []
+        self.fail_first_n = fail_first_n
 
     def generate_content(self, **kw):
         self.configs.append(kw.get("config"))
-        return SimpleNamespace(text='{"ok": true}')
+        if len(self.configs) <= self.fail_first_n:
+            raise RuntimeError("503 Service Unavailable")
+        return SimpleNamespace(
+            text='{"ok": true}',
+            usage_metadata=SimpleNamespace(
+                prompt_token_count=1_000_000,
+                cached_content_token_count=0,
+                candidates_token_count=1_000_000,
+                thoughts_token_count=0,
+                tool_use_prompt_token_count=0,
+                total_token_count=2_000_000,
+            ),
+        )
 
 
 class FakeClient:
-    def __init__(self) -> None:
-        self.models = FakeModels()
+    def __init__(self, fail_first_n: int = 0) -> None:
+        self.models = FakeModels(fail_first_n=fail_first_n)
 
 
 with genai_types_context():
+    import usage_meter as U
+
+    R.reset_flex_state()
     fake_default = FakeClient()
+    um_flex = U.UsageMeter()
+    um_flex.enabled = True
     with mock.patch.object(R, "gemini_client", return_value=fake_default), \
          mock.patch.object(R, "resolve_model", return_value="gemini-4-hydrogen"), \
-         mock.patch.object(R, "meter", mock.Mock()):
+         mock.patch.object(R, "meter", um_flex):
         res = R.gemini_json("prompt", "test")
     cfg = fake_default.models.configs[0]
     lvl = getattr(getattr(cfg, "thinking_config", None), "thinking_level", None)
     lvl_val = getattr(lvl, "value", lvl)
+    tier_val = getattr(getattr(cfg, "service_tier", None), "value", getattr(cfg, "service_tier", None))
     check("default GEMINI_THINKING_LEVEL is MEDIUM", R.GEMINI_THINKING_LEVEL == "MEDIUM")
+    check("default GEMINI_SERVICE_TIER is flex", R.GEMINI_SERVICE_TIER == "flex")
     check(
-        "gemini_json passes thinking_level=MEDIUM, response_mime_type, temperature",
+        "gemini_json passes thinking_level=MEDIUM, service_tier=flex, 60s http_options, and bills 50%",
         res == {"ok": True}
         and cfg.thinking_config is not None
         and lvl_val == "MEDIUM"
+        and tier_val == "flex"
+        and getattr(cfg.http_options, "timeout", None) == R.FLEX_TIMEOUT_MS
         and cfg.response_mime_type == "application/json"
-        and cfg.temperature == 0.3,
+        and cfg.temperature == 0.3
+        and abs(um_flex.totals()["usd"] - 4.5) < 1e-6,
     )
 
+    R.reset_flex_state()
     fake_empty = FakeClient()
     with mock.patch.object(R, "GEMINI_THINKING_LEVEL", ""), \
          mock.patch.object(R, "gemini_client", return_value=fake_empty), \
@@ -221,7 +259,87 @@ with genai_types_context():
         and cfg2.temperature == 0.3,
     )
 
-# 5. Environment variable parsing of GEMINI_THINKING_LEVEL (unset / whitespace / blank)
+    # Flex 503 immediate fallback to Standard + 2-strike circuit breaker + Standard billing
+    R.reset_flex_state()
+    um_fb = U.UsageMeter()
+    um_fb.enabled = True
+    with mock.patch.object(R.time, "sleep") as mock_sleep, \
+         mock.patch.object(R, "resolve_model", return_value="gemini-4-hydrogen"), \
+         mock.patch.object(R, "meter", um_fb):
+        fake_fb1 = FakeClient(fail_first_n=1)
+        with mock.patch.object(R, "gemini_client", return_value=fake_fb1):
+            res_fb1 = R.gemini_json("prompt", "test")
+        fake_fb2 = FakeClient(fail_first_n=1)
+        with mock.patch.object(R, "gemini_client", return_value=fake_fb2):
+            res_fb2 = R.gemini_json("prompt", "test")
+        fake_after = FakeClient()
+        with mock.patch.object(R, "gemini_client", return_value=fake_after):
+            res_after = R.gemini_json("prompt", "test")
+    check(
+        "Flex failure falls back immediately to Standard and disables Flex after 2 consecutive failures",
+        res_fb1 == {"ok": True}
+        and res_fb2 == {"ok": True}
+        and res_after == {"ok": True}
+        and getattr(fake_fb1.models.configs[0], "service_tier", None) is not None
+        and getattr(fake_fb1.models.configs[1], "service_tier", None) is None
+        and getattr(fake_fb1.models.configs[1], "http_options", None) is None
+        and R._FLEX_STATE["disabled"] is True
+        and getattr(fake_after.models.configs[0], "service_tier", None) is None
+        and mock_sleep.call_args_list == [mock.call(1), mock.call(1)]
+        and abs(um_fb.totals()["usd"] - 27.0) < 1e-6,
+    )
+
+    # Deadline circuit breaker
+    R.reset_flex_state()
+    R._FLEX_STATE["started_monotonic"] = R.time.monotonic() - (R.FLEX_DEADLINE_SECONDS + 5)
+    fake_dl = FakeClient()
+    with mock.patch.object(R, "gemini_client", return_value=fake_dl), \
+         mock.patch.object(R, "resolve_model", return_value="gemini-4-hydrogen"), \
+         mock.patch.object(R, "meter", mock.Mock()):
+        res_dl = R.gemini_json("prompt", "test")
+    check(
+        "Deadline circuit breaker skips Flex and uses Standard",
+        res_dl == {"ok": True}
+        and R._FLEX_STATE["disabled"] is True
+        and getattr(fake_dl.models.configs[0], "service_tier", None) is None,
+    )
+
+    # GEMINI_SERVICE_TIER="standard" disables Flex from the start
+    R.reset_flex_state()
+    fake_std = FakeClient()
+    with mock.patch.object(R, "GEMINI_SERVICE_TIER", "standard"), \
+         mock.patch.object(R, "gemini_client", return_value=fake_std), \
+         mock.patch.object(R, "resolve_model", return_value="gemini-4-hydrogen"), \
+         mock.patch.object(R, "meter", mock.Mock()):
+        res_std = R.gemini_json("prompt", "test")
+    check(
+        "GEMINI_SERVICE_TIER=standard calls Standard directly",
+        res_std == {"ok": True} and getattr(fake_std.models.configs[0], "service_tier", None) is None,
+    )
+
+# 5. _cover_digest_text keeps title + first paragraph <= 200 chars and strips paragraphs 2..5
+sample_summaries = [
+    {
+        "title_ja": "記事A",
+        "summary": ("第一段落" * 60) + "\n\n第二段落（除去対象）\n\n第三段落\n\n第四段落\n\n第五段落",
+    },
+    {"title_ja": "(翻訳失敗)", "summary": "失敗要約"},
+    {"title_ja": "記事B", "summary": "短い第一段落\n\n第二段落B"},
+]
+dig_ai = R._cover_digest_text(sample_summaries, skip_failed_title=True)
+dig_note = R._cover_digest_text(sample_summaries, skip_failed_title=False)
+check(
+    "_cover_digest_text trims to title + <=200-char 1st paragraph and respects skip_failed_title",
+    "第二段落" not in dig_ai
+    and "第三段落" not in dig_ai
+    and "(翻訳失敗)" not in dig_ai
+    and "(翻訳失敗)" in dig_note
+    and ("第一段落" * 50) in dig_ai
+    and ("第一段落" * 51) not in dig_ai
+    and "短い第一段落" in dig_ai,
+)
+
+# 6. Environment variable parsing of GEMINI_THINKING_LEVEL (unset / whitespace / blank)
 with tempfile.TemporaryDirectory() as tmp:
     out_override = str(pathlib.Path(tmp) / "out")
     for label, env_val, expected in (

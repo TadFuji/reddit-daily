@@ -103,8 +103,14 @@ JST = dt.timezone(dt.timedelta(hours=9), name="JST")
 # 2026-09-08 後継の 3.8-flash へ更新（公式ドキュメントで GA 提供を確認）。旧 3.7 を先頭のフォールバックに残す。
 # 2026-11-13 藤川さんの指示で gemini-4-hydrogen へ更新（API のモデル一覧で提供を確認済み）。旧 3.8 を先頭のフォールバックに残す。
 # 2026-11-16 藤川さんの指示で思考の深さを MEDIUM（旧 3.8-flash 既定と同等）へ設定（4-hydrogen 既定は HIGH）。
+# 2026-11-16 Flex 推論（50%割引、遅延・混雑失敗時は即座に Standard へ自動退避）を導入。
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-4-hydrogen")
 GEMINI_THINKING_LEVEL = os.environ.get("GEMINI_THINKING_LEVEL", "MEDIUM").strip()
+GEMINI_SERVICE_TIER = os.environ.get("GEMINI_SERVICE_TIER", "flex").strip().lower()
+FLEX_TIMEOUT_MS = int(os.environ.get("REDDIT_FLEX_TIMEOUT_MS", "60000"))
+FLEX_MAX_STREAK_FAILURES = 2
+FLEX_MAX_TOTAL_FAILURES = 4
+FLEX_DEADLINE_SECONDS = int(os.environ.get("REDDIT_FLEX_DEADLINE_SECONDS", "2400"))
 GEMINI_FALLBACK_CANDIDATES = ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash"]
 MAX_CALL_RETRIES = 3
 
@@ -141,6 +147,31 @@ def log(label: str, msg: str) -> None:
 
 _CLIENT = None
 _MODEL = None
+
+_FLEX_STATE: dict[str, float | int | bool] = {
+    "started_monotonic": time.monotonic(),
+    "streak_failures": 0,
+    "total_failures": 0,
+    "disabled": False,
+}
+
+
+def reset_flex_state() -> None:
+    """Reset the Flex circuit breaker timer and failure counters."""
+    _FLEX_STATE["started_monotonic"] = time.monotonic()
+    _FLEX_STATE["streak_failures"] = 0
+    _FLEX_STATE["total_failures"] = 0
+    _FLEX_STATE["disabled"] = False
+
+
+def _should_use_flex() -> bool:
+    if GEMINI_SERVICE_TIER != "flex" or _FLEX_STATE["disabled"]:
+        return False
+    if (time.monotonic() - float(_FLEX_STATE["started_monotonic"])) >= FLEX_DEADLINE_SECONDS:
+        _FLEX_STATE["disabled"] = True
+        log("gemini", "Flex 推論の許容経過時間を超えたため、残りの呼び出しを通常モード（Standard）へ切り替えます")
+        return False
+    return True
 
 
 def gemini_client():
@@ -183,22 +214,31 @@ def gemini_json(prompt: str, label: str, cache_stem: str | None = None) -> dict 
         (CACHE / f"{cache_stem}.txt").write_text(prompt, encoding="utf-8")
     client = gemini_client()
     model = resolve_model()
-    cfg_kwargs: dict = {
-        "temperature": 0.3,
-        "response_mime_type": "application/json",
-    }
-    if GEMINI_THINKING_LEVEL:
-        cfg_kwargs["thinking_config"] = types.ThinkingConfig(
-            thinking_level=GEMINI_THINKING_LEVEL
-        )
     for attempt in range(1, MAX_CALL_RETRIES + 1):
+        use_flex = attempt == 1 and _should_use_flex()
+        cfg_kwargs: dict = {
+            "temperature": 0.3,
+            "response_mime_type": "application/json",
+        }
+        if GEMINI_THINKING_LEVEL:
+            cfg_kwargs["thinking_config"] = types.ThinkingConfig(
+                thinking_level=GEMINI_THINKING_LEVEL
+            )
+        if use_flex:
+            cfg_kwargs["service_tier"] = "flex"
+            cfg_kwargs["http_options"] = types.HttpOptions(timeout=FLEX_TIMEOUT_MS)
+
+        api_ok = False
         try:
             resp = client.models.generate_content(
                 model=model,
                 contents=prompt,
                 config=types.GenerateContentConfig(**cfg_kwargs),
             )
-            meter.record(model, resp, label=label)
+            api_ok = True
+            meter.record(model, resp, label=label, service_tier="flex" if use_flex else None)
+            if use_flex:
+                _FLEX_STATE["streak_failures"] = 0
             text = (resp.text or "").strip()
             if not text:
                 raise ValueError("empty response (safety block?)")
@@ -210,8 +250,17 @@ def gemini_json(prompt: str, label: str, cache_stem: str | None = None) -> dict 
             return obj
         except Exception as e:
             log(label, f"attempt {attempt}/{MAX_CALL_RETRIES} failed: {type(e).__name__}: {str(e)[:200]}")
+            if use_flex and not api_ok:
+                _FLEX_STATE["streak_failures"] = int(_FLEX_STATE["streak_failures"]) + 1
+                _FLEX_STATE["total_failures"] = int(_FLEX_STATE["total_failures"]) + 1
+                if (
+                    int(_FLEX_STATE["streak_failures"]) >= FLEX_MAX_STREAK_FAILURES
+                    or int(_FLEX_STATE["total_failures"]) >= FLEX_MAX_TOTAL_FAILURES
+                ):
+                    _FLEX_STATE["disabled"] = True
+                    log(label, "Flex 推論の失敗が閾値に達したため、残りの呼び出しを通常モード（Standard）へ切り替えます")
             if attempt < MAX_CALL_RETRIES:
-                time.sleep(4 * attempt)
+                time.sleep(1 if use_flex else 4 * attempt)
     return None
 
 
@@ -741,6 +790,24 @@ def step3_editorial(variant: str, summaries: list[dict], followup: bool) -> None
     )
 
 
+def _cover_digest_text(summaries: list[dict], *, skip_failed_title: bool = False) -> str:
+    """Build concise cover prompt text (title + 1st paragraph <= 200 chars) per post."""
+    items: list[str] = []
+    for d in summaries:
+        title = (d.get("title_ja") or "").strip()
+        if skip_failed_title and title == "(翻訳失敗)":
+            continue
+        summary = (d.get("summary") or "").replace("\r\n", "\n").strip()
+        first_para = summary.split("\n\n", 1)[0].strip()[:200]
+        if title and first_para:
+            items.append(f"{title}\n{first_para}")
+        elif title:
+            items.append(title)
+        elif first_para:
+            items.append(first_para)
+    return "\n\n".join(items)
+
+
 def step3_x_cover(summaries: list[dict]) -> None:
     """Cover image for the AI X article (2026-10-11 追加).
 
@@ -754,10 +821,7 @@ def step3_x_cover(summaries: list[dict]) -> None:
     except ImportError as e:  # VPS への転送漏れで本番を止めない
         log("gemini-ai", f"WARNING: x_cover.py を読めないためカバー画像なし: {e}")
         return
-    text = "\n\n".join(
-        f"{d.get('title_ja', '')}\n{d.get('summary', '')}"
-        for d in summaries if d.get("title_ja") != "(翻訳失敗)"
-    )
+    text = _cover_digest_text(summaries, skip_failed_title=True)
     log("gemini-ai", "Step 3.5: X 記事のカバー画像")
     x_cover.make_cover(text, out)
 
@@ -775,7 +839,7 @@ def step3_note_cover(summaries: list[dict]) -> None:
     except ImportError as e:  # VPS への転送漏れで本番を止めない
         log("gemini-std", f"WARNING: note_cover.py を読めないため note の表紙なし: {e}")
         return
-    text = "\n\n".join(f"{d.get('title_ja', '')}\n{d.get('summary', '')}" for d in summaries)
+    text = _cover_digest_text(summaries, skip_failed_title=False)
     log("gemini-std", "Step 3.5: note の表紙（ドット絵）")
     note_cover.make_cover(text, out)
 
@@ -1005,12 +1069,17 @@ def main() -> int:
     args = ap.parse_args()
 
     CACHE.mkdir(exist_ok=True)
+    reset_flex_state()
     # Record the resolved model for the assemblers' generated_by field.
     model = resolve_model()
     (CACHE / "gemini_meta.json").write_text(
         json.dumps({"model": model}, ensure_ascii=False), encoding="utf-8"
     )
-    log("gemini", f"using model: {model} (thinking_level={GEMINI_THINKING_LEVEL or 'default'})")
+    log(
+        "gemini",
+        f"using model: {model} (thinking_level={GEMINI_THINKING_LEVEL or 'default'}, "
+        f"service_tier={GEMINI_SERVICE_TIER or 'standard'})",
+    )
 
     targets = ["standard", "ai", "seminar"] if args.target == "all" else [args.target]
     started = time.time()
