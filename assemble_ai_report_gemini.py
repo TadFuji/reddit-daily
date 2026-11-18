@@ -105,10 +105,10 @@ def note_hashtags(extras) -> list[str]:
 
 def note_title(editorial: dict, pairs: list, date_str: str) -> str:
     d = dt.date.fromisoformat(date_str)
-    catch = one_line(editorial.get("note_catch") or "").strip()
+    catch = one_line(editorial.get("note_catch") or "").removeprefix("今日の目玉は").strip()
     if not catch and pairs:  # 生成に失敗したら 1 本目の見出しで補う
         catch = one_line(pairs[0][1].get("title_ja", ""))[:22]
-    return f"{NOTE_TITLE_PREFIX} {d.strftime('%Y/%m/%d')}｜{catch}"
+    return f"{NOTE_TITLE_PREFIX} {d.strftime('%Y/%m/%d')}｜今日の目玉は{catch}"
 
 
 def build_note(pairs: list, editorial: dict, date_str: str) -> str:

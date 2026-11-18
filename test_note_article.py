@@ -218,8 +218,8 @@ check("assembler: note, note cover, AI report, and X article written",
 check("assembler: note written before the AI report",
       note.stat().st_mtime_ns <= report.stat().st_mtime_ns)
 text = note.read_text(encoding="utf-8")
-check("note: title in the fixed format without '今日の目玉は'",
-      "案1: Reddit日本語解説 2026/10/12｜Claudeの新機能が話題" in text)
+check("note: title matches note_upload format with '今日の目玉は'",
+      "案1: Reddit日本語解説 2026/10/12｜今日の目玉はClaudeの新機能が話題" in text)
 tag_line = next(l for l in text.splitlines() if l.startswith("#"))
 tags = tag_line.split()
 check("note: 7 fixed + 2 new hashtags (third extra was a duplicate), cleaned",
@@ -256,7 +256,7 @@ check("follow-up run: AI report and X article written, but no note or note cover
 out3 = run_assembler({"editors_note": "x"}, with_note_cover=False, with_x_cover=False)
 text3 = (out3 / "2026-10-12-Reddit-Top30-note.md").read_text(encoding="utf-8")
 check("note: editorial failure falls back (title from first headline, fixed tags only)",
-      "案1: Reddit日本語解説 2026/10/12｜見出し1" in text3
+      "案1: Reddit日本語解説 2026/10/12｜今日の目玉は見出し1" in text3
       and len(next(l for l in text3.splitlines() if l.startswith("#")).split()) == 7
       and A.validate_note(text3) == [])
 check("note: no cover when generation failed", not list(out3.glob("*-cover.png")))
