@@ -66,7 +66,7 @@ check("cover copied", "📍 X_AI_2026-10-11_0615_cover.png" in names)
 art = (out / "📍 X_AI_2026-10-11_0615.md").read_text(encoding="utf-8")
 check("frontmatter type", art.startswith("---\ntype: x-article\n"))
 check("cover in frontmatter", 'cover: "📍 X_AI_2026-10-11_0615_cover.png"' in art)
-check("title", "\n# Reddit AIトレンド 2026/10/11｜目玉の話題\n" in art)
+check("title", "\n# Reddit AI 注目記事 2026/10/11｜目玉の話題\n" in art)
 check("promotion section", "## 宣伝文\n\n宣伝の一文です。\n\n## 本文\n" in art)
 check("links inline", art.count("🔗 [元の投稿を見る](https://www.reddit.com/") == 2)
 check("literal \\n\\n split", "三。\n\n四。" in art)
@@ -78,10 +78,10 @@ check("order title<promotion<body<posts",
 # 2. editorial without the new fields and no cover: fallbacks
 out = run_assembler({"editors_note": NOTE}, with_cover=False)
 art = (out / "📍 X_AI_2026-10-11_0615.md").read_text(encoding="utf-8")
-# 件数は実際に載せた本数（このテストでは 2 本。本番は config_ai.json の top_n = 30）
-check("fallback title", "\n# Reddit AIトレンド Top 2｜2026/10/11\n" in art)
+# 件数は実際に載せた本数（このテストでは 2 本。本番は config_ai.json の top_n = 20）
+check("fallback title", "\n# Reddit AI 注目記事 2026/10/11｜注目記事2本\n" in art)
 normal = (out / "AI_2026-10-11_0615_gemini.md").read_text(encoding="utf-8")
-check("normal report heading count", "# 🤖 Reddit AI トレンド Top 2\n" in normal)
+check("normal report heading count", "# Reddit AI 注目記事 2本\n" in normal)
 check("fallback promotion = editors note", f"## 宣伝文\n\n{NOTE}\n" in art)
 check("no cover line without cover", "cover:" not in art)
 check("no png without cover", not list(out.glob("*.png")))

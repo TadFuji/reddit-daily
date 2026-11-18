@@ -1,11 +1,6 @@
-"""Offline checks for the Reddit daily-trend note article (no network, no API key).
+"""Offline checks for the Reddit AI note article (no network, no API key).
 
     python3 test_note_article.py
-
-Covers: which posts go into the note (Step 2 stopping rule and exclusions), the note
-manuscript's shape (title, hashtags, paste marker, note-output-spec rules), the report
-written next to it, the follow-up run that must not overwrite the morning note, and the
-cover crop size (skipped when Pillow is missing).
 """
 import io
 import json
@@ -19,7 +14,7 @@ import tempfile
 
 BASE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(BASE))
-import assemble_report_gemini as A  # noqa: E402
+import assemble_ai_report_gemini as A  # noqa: E402
 import run_reddit_gemini as R  # noqa: E402
 
 
@@ -32,95 +27,183 @@ def check(name, cond):
 check.failed = False
 
 
-def post(i, sub="pics", selftext=""):
+def post(i, sub="artificial", selftext=""):
     return {"id": f"p{i}", "title": f"title {i}", "subreddit": sub, "author": "a",
             "url": f"https://www.reddit.com/r/{sub}/comments/p{i}/t/", "selftext": selftext,
             "age_hours": 3.0, "ups": None, "num_comments": None, "comments": [], "buzz_score": 40 - i}
 
 
-def summary(i, ok=True, reason=""):
-    return {"category": "Humor", "title_ja": f"見出し{i}", "summary": f"第一段落{i}。\n\n第二段落{i}。",
-            "note_ok": ok, "note_ng_reason": reason}
+def summary(i):
+    return {"category": "LLM", "title_ja": f"見出し{i}", "summary": f"第一段落{i}。\n\n第二段落{i}。"}
 
 
 # ---------------------------------------------------------------------------
-# 1. Step 2 stops once note_target posts are publishable, skips adult subreddits
-#    without calling Gemini, and treats a failed summary as not publishable.
+# 1. Step 2 summarizes all AI posts and step3_editorial includes X + note fields
 # ---------------------------------------------------------------------------
 calls = []
+prompts = []
 
 
 def fake_gemini(prompt, label, cache_stem=None):
     calls.append(cache_stem)
+    prompts.append(prompt)
+    if cache_stem and cache_stem.endswith("_step3"):
+        return {
+            "editors_note": "今日のRedditはAI話題が中心でした。",
+            "star_picks": [1],
+            "cross_refs": {},
+            "x_headline": "目玉の話題",
+            "x_promotion": "宣伝文です。",
+            "note_catch": "Claudeの新機能",
+            "note_points": ["一点目。", "二点目。", "三点目。"],
+            "note_extra_hashtags": ["Claude", "OpenAI", "AI"],
+            "closing_comment": "また明日。",
+        }
     n = int(cache_stem.rsplit("_", 1)[1])
     if n == 2:
-        return None  # e.g. the safety filter returned nothing
-    if n == 4:
-        return summary(n, ok=False, reason="性的な内容")
-    if n == 5:
-        return {**summary(n), "note_ok": "true"}  # a string is not an explicit yes
+        return None
     return summary(n)
 
 
 tmp_cache = pathlib.Path(tempfile.mkdtemp())
-orig = (R.gemini_json, R.CACHE, R.note_target, R.writing_rules)
+orig = (R.gemini_json, R.CACHE, R.writing_norms)
 R.gemini_json, R.CACHE = fake_gemini, tmp_cache
-R.note_target = lambda v: 3 if v == "standard" else None
-R.writing_rules = lambda: ""
-posts = [post(1), post(2), post(3, sub="NSFW_stuff"), post(4), post(5), post(6), post(7), post(8)]
-used, summ = R.step2_summaries("standard", posts)
-ok_ids = [p["id"] for p, s in zip(used, summ) if R.is_note_ok(s)]
-check("step2: stops after 3 publishable posts", ok_ids == ["p1", "p6", "p7"])
-check("step2: returned posts and summaries line up", len(used) == len(summ) == 7)
-check("step2: adult subreddit skipped without a Gemini call", "gemini_standard_3" not in calls
-      and summ[2].get("skipped") and summ[2]["note_ok"] is False)
-check("step2: failed summary is not publishable", summ[1]["note_ok"] is False
-      and summ[1]["title_ja"] == "(翻訳失敗)")
-check("step2: string 'true' is not an explicit yes", not R.is_note_ok(summ[4]))
-check("step2: post 8 never summarised", "gemini_standard_8" not in calls)
+R.writing_norms = lambda: ""
+posts = [post(1), post(2), post(3)]
+used, summ = R.step2_summaries("ai", posts)
+check("step2: AI report summarizes every post", len(used) == len(summ) == 3 and len(calls) == 3)
+check("step2: failed summary becomes FAIL_ENTRY", summ[1] == R.FAIL_ENTRY)
 
-calls.clear()
-used_ai, summ_ai = R.step2_summaries("ai", [post(1), post(2), post(3, sub="NSFW_stuff")])
-check("step2: AI report keeps every post (no note filtering)", len(summ_ai) == 3 and len(calls) == 3)
-R.gemini_json, R.CACHE, R.note_target, R.writing_rules = orig
+prompts.clear()
+R.step3_editorial("ai", summ, followup=False)
+step3_saved = json.loads((tmp_cache / "gemini_ai_step3.json").read_text(encoding="utf-8"))
+check(
+    "step3_editorial: requests common + X + note fields in one call and stores _followup",
+    len(prompts) == 1
+    and all(k in prompts[0] for k in ("editors_note", "x_headline", "x_promotion", "note_catch", "note_points", "note_extra_hashtags", "closing_comment"))
+    and step3_saved.get("_followup") is False
+    and step3_saved.get("note_catch") == "Claudeの新機能",
+)
+R.gemini_json, R.CACHE, R.writing_norms = orig
+
+# 1b. run_variant("ai") calls both x_cover and note_cover (unless followup), and main() accepts ai/all + push
+with tempfile.TemporaryDirectory() as rv_tmp:
+    rv_dir = pathlib.Path(rv_tmp)
+    rv_cache = rv_dir / ".cache"
+    rv_out = rv_dir / "out"
+    rv_cache.mkdir()
+    rv_out.mkdir()
+    (rv_cache / "ai_data.json").write_text(json.dumps({
+        "date": "2026-10-12",
+        "generated_at": "2026-10-12T06:00:00+09:00",
+        "sources_total": 14,
+        "sources_ok": 14,
+        "sources_error": 0,
+        "total_fetched": 3,
+        "posts": [post(1), post(2), post(3)],
+    }), encoding="utf-8")
+    cover_calls = []
+    orig_rv = (R.CACHE, R.REPORT_DIR, R.step2_summaries, R.step3_editorial,
+               R.step3_x_cover, R.step3_note_cover, R.step4_assemble)
+    R.CACHE = rv_cache
+    R.REPORT_DIR = rv_out
+    R.step2_summaries = lambda v, ps: (ps, [summary(1), summary(2), summary(3)])
+    R.step3_editorial = lambda v, ss, fu: cover_calls.append(("editorial", fu))
+    R.step3_x_cover = lambda ss: cover_calls.append(("x_cover",))
+    R.step3_note_cover = lambda ss: cover_calls.append(("note_cover",))
+    R.step4_assemble = lambda v: cover_calls.append(("assemble", v))
+    st = {}
+    ok_rv = R.run_variant("ai", skip_fetch=True, stats=st)
+    check(
+        "run_variant('ai') runs editorial, x_cover, note_cover, assemble when not followup",
+        ok_rv and cover_calls == [("editorial", False), ("x_cover",), ("note_cover",), ("assemble", "ai")],
+    )
+    # Simulate follow-up run (earlier report already exists with p1)
+    (rv_out / f"AI_{R.dt.datetime.now(R.JST).strftime('%Y-%m-%d')}_0600_gemini.md").write_text(
+        "https://www.reddit.com/r/artificial/comments/p1/t/", encoding="utf-8"
+    )
+    (rv_cache / "ai_data.json").write_text(json.dumps({
+        "date": "2026-10-12",
+        "generated_at": "2026-10-12T12:00:00+09:00",
+        "sources_total": 14,
+        "sources_ok": 14,
+        "sources_error": 0,
+        "total_fetched": 4,
+        "posts": [post(1), post(2), post(3), post(4)],
+    }), encoding="utf-8")
+    cover_calls.clear()
+    ok_fu = R.run_variant("ai", skip_fetch=True, stats={})
+    check(
+        "run_variant('ai') skips note_cover on followup run",
+        ok_fu and cover_calls == [("editorial", True), ("x_cover",), ("assemble", "ai")],
+    )
+    R.CACHE, R.REPORT_DIR, R.step2_summaries, R.step3_editorial, R.step3_x_cover, R.step3_note_cover, R.step4_assemble = orig_rv
+
+    # main() accepts both 'ai' and 'all', pushes note after ai, and checks REDDIT_REQUIRE_PUSH
+    for target in ("ai", "all"):
+        main_calls = []
+        orig_main = (R.CACHE, R.resolve_model, R.run_variant, R.push_note_to_github,
+                     R.run_healthcheck, R.meter, sys.argv, os.environ.get("REDDIT_REQUIRE_PUSH"))
+        R.CACHE = rv_cache
+        R.resolve_model = lambda: "gemini-4-hydrogen"
+        R.run_variant = lambda v, sf, s: (main_calls.append(("run", v)), True)[1]
+        R.push_note_to_github = lambda s: (main_calls.append(("push",)), s.setdefault("ai", {}).__setitem__("note_pushed", False))
+        R.run_healthcheck = lambda *a, **k: main_calls.append(("hc",))
+        os.environ["REDDIT_REQUIRE_PUSH"] = "1"
+        sys.argv = ["run_reddit_gemini.py", target]
+        rc = R.main()
+        R.CACHE, R.resolve_model, R.run_variant, R.push_note_to_github, R.run_healthcheck, R.meter, sys.argv, prev_req = orig_main
+        if prev_req is None:
+            os.environ.pop("REDDIT_REQUIRE_PUSH", None)
+        else:
+            os.environ["REDDIT_REQUIRE_PUSH"] = prev_req
+        check(
+            f"main('{target}') runs ai + push and fails when REDDIT_REQUIRE_PUSH=1 and note_pushed=False",
+            rc == 1 and main_calls == [("run", "ai"), ("push",), ("hc",)],
+        )
 
 check("hashtags: fixed tags agree between generator and assembler",
-      R.NOTE_FIXED_HASHTAGS == A.NOTE_FIXED_HASHTAGS)
-check("file stem agrees between generator and assembler", R.NOTE_FILE_STEM == A.NOTE_FILE_STEM)
-check("standard prompt still formats", "note_ok" in R.STANDARD_PROMPT.format(
-    comment_rule="", post_data="x", writing_norms="", writing_rules=""))
+      R.NOTE_FIXED_HASHTAGS == A.NOTE_FIXED_HASHTAGS
+      and A.NOTE_FIXED_HASHTAGS == "#毎日note #Reddit #AI #生成AI #海外ニュース #海外トレンド #海外の反応")
+check("file stem agrees between generator and assembler", R.NOTE_FILE_STEM == A.NOTE_FILE_STEM == "Reddit-Top30")
+check("AI prompt formats", "title_ja" in R.AI_PROMPT.format(
+    comment_rule="", post_data="x", writing_norms=""))
 
 
 # ---------------------------------------------------------------------------
-# 2. Assembler: note first, then the report; excluded posts stay out of the note.
+# 2. Assembler: note + cover, AI report, and X article
 # ---------------------------------------------------------------------------
-POSTS = [post(1), post(2, sub="nextfuckinglevel"), post(3), post(4)]
-SUMMARIES = [summary(1), summary(2), summary(3, ok=False, reason="個人を晒す内容"), summary(4)]
+POSTS = [post(1), post(2, sub="nextfuckinglevel"), post(3, sub="LocalLLaMA")]
+SUMMARIES = [summary(1), summary(2), summary(3)]
 EDITORIAL = {
-    "editors_note": "今日のRedditは猫の話題が多めでした。",
+    "editors_note": "今日のRedditはAIエージェントの話題が多めでした。",
     "star_picks": [1], "cross_refs": {"2": "→ #1 も参照"},
-    "note_catch": "今日の目玉は高齢の猫に毛が生えた話",
-    "note_points": ["猫の話題。", "**太字**の混入。", "三つ目。"],
-    "note_extra_hashtags": ["#猫", "スフィンクス", "#毎日note"],
+    "x_headline": "目玉の話題",
+    "x_promotion": "今日のAI話題をまとめました。",
+    "note_catch": "Claudeの新機能が話題",
+    "note_points": ["エージェントの話題。", "**太字**の混入。", "三つ目。"],
+    "note_extra_hashtags": ["#Claude", "LocalLLM", "#毎日note"],
     "closing_comment": "明日もお楽しみに。",
     "_followup": False,
 }
 
 
-def run_assembler(editorial, with_cover=True):
+def run_assembler(editorial, with_note_cover=True, with_x_cover=True):
     work = pathlib.Path(tempfile.mkdtemp())
     out = work / "out"
-    shutil.copy(BASE / "assemble_report_gemini.py", work)
+    shutil.copy(BASE / "assemble_ai_report_gemini.py", work)
     (work / ".cache").mkdir()
-    (work / ".cache/standard_data.json").write_text(json.dumps(
+    (work / ".cache/ai_data.json").write_text(json.dumps(
         {"date": "2026-10-12", "generated_at": "2026-10-12T06:01:00+09:00", "posts": POSTS}))
-    (work / ".cache/gemini_standard_posts.json").write_text(json.dumps(POSTS))
-    (work / ".cache/gemini_standard_step2.json").write_text(json.dumps(SUMMARIES, ensure_ascii=False))
-    (work / ".cache/gemini_standard_step3.json").write_text(json.dumps(editorial, ensure_ascii=False))
-    if with_cover:
-        (work / ".cache/gemini_standard_note_cover.png").write_bytes(b"\x89PNG fake")
+    (work / ".cache/gemini_ai_posts.json").write_text(json.dumps(POSTS))
+    (work / ".cache/gemini_ai_step2.json").write_text(json.dumps(SUMMARIES, ensure_ascii=False))
+    (work / ".cache/gemini_ai_step3.json").write_text(json.dumps(editorial, ensure_ascii=False))
+    if with_note_cover:
+        (work / ".cache/gemini_ai_note_cover.png").write_bytes(b"\x89PNG fake note")
+    if with_x_cover:
+        (work / ".cache/gemini_ai_cover.png").write_bytes(b"\x89PNG fake x")
     env = dict(os.environ, REDDIT_OUT_DIR=str(out))
-    subprocess.run([sys.executable, str(work / "assemble_report_gemini.py")], env=env,
+    subprocess.run([sys.executable, str(work / "assemble_ai_report_gemini.py")], env=env,
                    check=True, capture_output=True)
     return out
 
@@ -128,26 +211,30 @@ def run_assembler(editorial, with_cover=True):
 out = run_assembler(EDITORIAL)
 note = out / "2026-10-12-Reddit-Top30-note.md"
 cover = out / "2026-10-12-Reddit-Top30-cover.png"
-report = out / "2026-10-12_0601_gemini.md"
-check("assembler: note, cover and report written", note.exists() and cover.exists() and report.exists())
-check("assembler: note written before the report (report is the completion mark)",
+report = out / "AI_2026-10-12_0601_gemini.md"
+x_art = out / "📍 X_AI_2026-10-12_0601.md"
+check("assembler: note, note cover, AI report, and X article written",
+      note.exists() and cover.exists() and report.exists() and x_art.exists())
+check("assembler: note written before the AI report",
       note.stat().st_mtime_ns <= report.stat().st_mtime_ns)
 text = note.read_text(encoding="utf-8")
-check("note: title in the fixed format, catch not doubled",
-      "案1: Reddit日本語解説 2026/10/12｜今日の目玉は高齢の猫に毛が生えた話" in text)
+check("note: title in the fixed format without '今日の目玉は'",
+      "案1: Reddit日本語解説 2026/10/12｜Claudeの新機能が話題" in text)
 tag_line = next(l for l in text.splitlines() if l.startswith("#"))
 tags = tag_line.split()
 check("note: 7 fixed + 2 new hashtags (third extra was a duplicate), cleaned",
-      len(tags) == 9 and "#猫" in tags and "#スフィンクス" in tags and tags.count("#毎日note") == 1)
+      len(tags) == 9 and "#Claude" in tags and "#LocalLLM" in tags and tags.count("#毎日note") == 1)
 check("note: paste marker present", A.NOTE_PASTE_MARKER in text)
 check("note: passes note-output-spec checks", A.validate_note(text) == [])
 body = text.split(A.NOTE_PASTE_MARKER, 1)[1]
-check("note: one ## heading per publishable post plus おわりに",
-      re.findall(r"^## (.+)$", body, re.M) == ["1. 見出し1", "2. 見出し2", "3. 見出し4", "おわりに"])
-check("note: excluded post is absent", "見出し3" not in text and "p3/" not in text)
+check("note: AI-focused intro text present",
+      "世界最大級の掲示板「Reddit（レディット）」のAI関連コミュニティでは、毎日最新のツールや研究、活用事例が活発に議論されています。"
+      "この記事では、2026年10月12日の注目記事3本をお届けします。" in body)
+check("note: one ## heading per post plus おわりに",
+      re.findall(r"^## (.+)$", body, re.M) == ["1. 見出し1", "2. 見出し2", "3. 見出し3", "おわりに"])
 check("note: profane subreddit name hidden but link kept",
       "nextfuckinglevel" not in body.replace(POSTS[1]["url"], "") and POSTS[1]["url"] in body)
-check("note: clean subreddit name shown", "- **掲示板**: r/pics" in body)
+check("note: clean subreddit name shown", "- **掲示板**: r/artificial" in body)
 check("note: markdown stripped from 3-line summary", "- **太字**の混入。" not in body and "- 太字の混入。" in body)
 check("note: summary paragraphs kept apart", "第一段落1。\n\n第二段落1。" in body)
 check("note_clean: image placeholder line dropped",
@@ -155,27 +242,22 @@ check("note_clean: image placeholder line dropped",
 check("validate_note: image placeholder reported",
       A.validate_note(A.NOTE_PASTE_MARKER + "\n【画像: 猫】\n") != [])
 
-# Same parser as the note.com uploader (../Hacker-News/note_upload.parse_article)
 titles = [m.group(1).strip() for m in re.finditer(r"^案[123][:：]\s*(.+)$", text, re.M)]
 check("note: uploader finds exactly one title", len(titles) == 1)
 
 rep = report.read_text(encoding="utf-8")
-check("report: heading counts the publishable posts", "# 🔥 Reddit デイリートレンド Top 3" in rep)
-check("report: excluded post listed with reason, not as an article",
-      "個人を晒す内容" in rep and len(re.findall(r"^### ", rep, re.M)) == 3)
-check("report: excluded list is not a ### section (importance.py reads ###)",
-      not re.search(r"^### .*note に載せなかった", rep, re.M))
-check("report: excluded post's link kept so the day's dedup sees it", "comments/p3/" in rep)
+check("report: heading uses new AI format", "# Reddit AI 注目記事 3本" in rep)
 
 out2 = run_assembler({**EDITORIAL, "_followup": True})
-check("follow-up run: report written but no note or cover",
-      not list(out2.glob("*-note.md")) and not list(out2.glob("*-cover.png"))
-      and list(out2.glob("*_gemini.md")))
+check("follow-up run: AI report and X article written, but no note or note cover",
+      not list(out2.glob("*-note.md")) and not (out2 / "2026-10-12-Reddit-Top30-cover.png").exists()
+      and list(out2.glob("AI_*_gemini.md")) and list(out2.glob("📍 X_AI_*.md")))
 
-out3 = run_assembler({"editors_note": "x"}, with_cover=False)
+out3 = run_assembler({"editors_note": "x"}, with_note_cover=False, with_x_cover=False)
 text3 = (out3 / "2026-10-12-Reddit-Top30-note.md").read_text(encoding="utf-8")
 check("note: editorial failure falls back (title from first headline, fixed tags only)",
-      "今日の目玉は見出し1" in text3 and len(next(l for l in text3.splitlines() if l.startswith("#")).split()) == 7
+      "案1: Reddit日本語解説 2026/10/12｜見出し1" in text3
+      and len(next(l for l in text3.splitlines() if l.startswith("#")).split()) == 7
       and A.validate_note(text3) == [])
 check("note: no cover when generation failed", not list(out3.glob("*-cover.png")))
 
@@ -189,16 +271,15 @@ try:
     import note_cover
 
     buf = io.BytesIO()
-    Image.new("RGB", (2752, 1536), "red").save(buf, "PNG")  # Gemini 16:9 2K
+    Image.new("RGB", (2752, 1536), "red").save(buf, "PNG")
     png = note_cover.crop_to_cover(buf.getvalue())
     check("cover: cropped to 1280x670", Image.open(io.BytesIO(png)).size == (1280, 670))
-    # 上端だけを削る（下の段のラベルを切らない）: 下端の 1 行が残ることを確かめる
     im = Image.new("RGB", (2752, 1536), "white")
-    im.paste((0, 0, 255), (0, 1526, 2752, 1536))  # a 10-px band along the bottom edge
-    buf = io.BytesIO(); im.save(buf, "PNG")
-    out = Image.open(io.BytesIO(note_cover.crop_to_cover(buf.getvalue())))
-    check("cover: bottom edge kept, top trimmed", out.getpixel((640, 669)) == (0, 0, 255))
-    # The style is the retro silkscreen poster (decided 2026-10-29; it was pixel art before).
+    im.paste((0, 0, 255), (0, 1526, 2752, 1536))
+    buf = io.BytesIO()
+    im.save(buf, "PNG")
+    out_img = Image.open(io.BytesIO(note_cover.crop_to_cover(buf.getvalue())))
+    check("cover: bottom edge kept, top trimmed", out_img.getpixel((640, 669)) == (0, 0, 255))
     check("cover: prompt asks for a retro poster", "シルクスクリーンのポスター" in note_cover.build_prompt("x"))
 except ImportError:
     print("SKIP cover crop (Pillow not installed)")

@@ -1,10 +1,8 @@
-"""Assemble the AI Reddit trend report (Gemini series).
-
-Same fixes as assemble_report_gemini.py: gemini cache files, None-safe
-metrics, robust paragraph split, _gemini.md filename, dynamic generated_by.
-"""
+"""Assemble the AI Reddit trend report, note.com manuscript, and X article (Gemini series)."""
+import datetime as dt
 import json
 import os
+import re
 import shutil
 import sys
 import unicodedata
@@ -24,6 +22,7 @@ def write_atomic(path: Path, text: str) -> None:
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(text, encoding="utf-8")
     tmp.replace(path)
+
 
 CATEGORY_EMOJI = {
     "LLM": "🧠", "ImageGen": "🎨", "Research": "📄", "Robotics": "🤖",
@@ -48,15 +47,148 @@ def load_model() -> str:
         return "gemini-4-hydrogen"
 
 
-# --- X 記事（2026-10-11 変更） -------------------------------------------------
-# 以前は X の通常投稿向けに、本文（📍 X_AI_*.md）と URL だけのコメント欄用
-# （📍 X_AI_*_コメント欄.md）の 2 本を書いていた。リンク入りの投稿は表示が
-# 抑えられるため URL を返信へ逃がしていた。X の「記事」として出すことにしたので、
-# Hacker News の for-X（Hacker-News/x_article.py）と同じ形の 1 本にまとめた:
-# frontmatter → # タイトル → ## 宣伝文 → ## 本文。リンクは各投稿の中に置く。
+# ---------------------------------------------------------------------------
+# note.com 記事
+# ---------------------------------------------------------------------------
+# 形は Hacker News の note 原稿（../Hacker-News/hn_daily.py の build_note）にそろえる。
+# 先頭の「案1:」・ハッシュタグ行・貼り付けの区切りは、note への自動投稿
+# （../Hacker-News/note_upload.py の parse_article）が読む目印なので崩さない。
+# 本文の記法は ../Hacker-News/note-output-spec.md に従う（## と ### だけ、表・斜体なし）。
+
+NOTE_FILE_STEM = "Reddit-Top30"  # 受け渡し互換のため維持（run_reddit_gemini.NOTE_FILE_STEM と同じ）
+NOTE_TITLE_PREFIX = "Reddit日本語解説"
+NOTE_FIXED_HASHTAGS = "#毎日note #Reddit #AI #生成AI #海外ニュース #海外トレンド #海外の反応"
+NOTE_HASHTAG_MAX = 10
+NOTE_PASTE_MARKER = "＝＝＝ ここから下を note 本文に全文貼り付け ＝＝＝"
+PROFANE_RE = re.compile(r"fuck|shit|cunt|bitch|dick|piss|porn|nsfw|sex", re.I)
+IMAGE_PLACEHOLDER_RE = re.compile(r"【[^】]{0,30}(画像|写真|スクリーンショット)[^】]{0,30}】")
+NOTE_CLOSING_DEFAULT = "今日も海外のAIコミュニティでは、最新のツールから研究動向まで、さまざまな話題が注目を集めていました。"
+
+
+def note_clean(text: str) -> str:
+    """LLM free text -> note-safe plain paragraphs (blank line between).
+
+    Mirrors hn_daily.sanitize_note: no markdown structure, no tables, no full-width spaces.
+    """
+    paras = []
+    for line in split_paragraphs(str(text)):
+        for sub in line.splitlines():
+            # 太字の記号は先に外す（後の行頭 * の除去が ** の片方だけを消すため）
+            sub = sub.replace("```", "").replace("**", "").replace("\u3000", " ").replace("|", "｜")
+            sub = re.sub(r"^\s*#{1,6}\s+", "", sub)
+            sub = re.sub(r"^\s*[*>|]\s*", "", sub)
+            sub = re.sub(r"^\s*-\s+", "", sub)
+            sub = re.sub(r"^\s*-{3,}\s*$", "", sub)
+            sub = sub.strip()
+            if IMAGE_PLACEHOLDER_RE.search(sub):
+                continue
+            if sub:
+                paras.append(sub)
+    return "\n\n".join(paras)
+
+
+def one_line(text: str) -> str:
+    return " ".join(note_clean(text).split())
+
+
+def note_hashtags(extras) -> list[str]:
+    """固定 7 個にその日の 3 個を足す（# を補い、記号と空白を外し、重複を除き、計 10 個まで）。"""
+    tags = NOTE_FIXED_HASHTAGS.split()
+    for t in extras or []:
+        t = "#" + re.sub(r"[\s#\-・/、。,.!?！？「」()（）]+", "", str(t))
+        if len(t) > 1 and t not in tags:
+            tags.append(t)
+        if len(tags) >= NOTE_HASHTAG_MAX:
+            break
+    return tags
+
+
+def note_title(editorial: dict, pairs: list, date_str: str) -> str:
+    d = dt.date.fromisoformat(date_str)
+    catch = one_line(editorial.get("note_catch") or "").strip()
+    if not catch and pairs:  # 生成に失敗したら 1 本目の見出しで補う
+        catch = one_line(pairs[0][1].get("title_ja", ""))[:22]
+    return f"{NOTE_TITLE_PREFIX} {d.strftime('%Y/%m/%d')}｜{catch}"
+
+
+def build_note(pairs: list, editorial: dict, date_str: str) -> str:
+    d = dt.date.fromisoformat(date_str)
+    date_ja = f"{d.year}年{d.month}月{d.day}日"
+    n = len(pairs)
+
+    lines = ["【note タイトル — 本文には含めません】"]
+    lines += [f"案1: {note_title(editorial, pairs, date_str)}"]
+    lines += ["", "＝＝＝ ハッシュタグ ＝＝＝", " ".join(note_hashtags(editorial.get("note_extra_hashtags")))]
+    lines += ["", NOTE_PASTE_MARKER, ""]
+
+    lines += [
+        "世界最大級の掲示板「Reddit（レディット）」のAI関連コミュニティでは、毎日最新のツールや研究、活用事例が活発に議論されています。"
+        f"この記事では、{date_ja}の注目記事{n}本をお届けします。"
+    ]
+
+    points = [one_line(p) for p in (editorial.get("note_points") or []) if one_line(p)][:3]
+    if points:
+        # 見出しにしない: note の目次は記事中の見出しをすべて拾う（Hacker News と同じ扱い）
+        lines += ["", "**今日の3行まとめ**", ""]
+        lines += [f"- {p}" for p in points]
+
+    for i, (post, summ) in enumerate(pairs, 1):
+        title = one_line(summ.get("title_ja") or post["title"])
+        lines += ["", f"## {i}. {title}", ""]
+        sub = post.get("subreddit") or ""
+        if sub and not PROFANE_RE.search(sub):
+            lines += [f"- **掲示板**: r/{sub}"]
+        lines += [f"- [元の投稿を見る]({post['url']})", ""]
+        body = note_clean(summ.get("summary") or "")
+        if body:
+            lines += [body]
+
+    closing = note_clean(editorial.get("closing_comment") or "") or NOTE_CLOSING_DEFAULT
+    lines += ["", "---", "", "## おわりに", "", closing, ""]
+    lines += [
+        "この記事は、海外の掲示板で毎日話題になっている投稿を、AIの力を借りて日本語で読み解いたものです。"
+        "本文はAIが投稿の題名と本文から書いており、画像や動画の中身までは確かめていません。"
+        "気になった投稿は、リンクから元の投稿もご覧ください。",
+        "",
+        f"**今日の{n}本で、あなたがいちばん気になったのはどれですか？よければコメントで教えてください。**",
+    ]
+    text = "\n".join(lines)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip() + "\n"
+
+
+def validate_note(text: str) -> list[str]:
+    """note-output-spec.md violations in the paste body (empty = OK).
+
+    Same rules as hn_daily.validate_note, which note_upload.py runs before publishing.
+    """
+    problems = []
+    body = text.split(NOTE_PASTE_MARKER, 1)[-1]
+    if re.search(r"\n{3,}", body):
+        problems.append("consecutive blank lines")
+    for n, line in enumerate(body.splitlines(), 1):
+        if re.match(r"^#(?!#)|^#{4,}", line):
+            problems.append(f"bad heading level at line {n}: {line[:40]!r}")
+        if "|" in line:
+            problems.append(f"table pipe at line {n}: {line[:40]!r}")
+        if re.match(r"^\s*\*\s", line):
+            problems.append(f"asterisk bullet at line {n}")
+        if "![" in line or "[^" in line:
+            problems.append(f"unsupported markup at line {n}: {line[:40]!r}")
+        if "\u3000" in line:
+            problems.append(f"full-width space at line {n}")
+        if "藤川さん" in line:
+            problems.append(f"personal address at line {n}")
+        if IMAGE_PLACEHOLDER_RE.search(line):
+            problems.append(f"image placeholder at line {n}: {line[:40]!r}")
+    return problems
+
+
+# ---------------------------------------------------------------------------
+# X 記事
+# ---------------------------------------------------------------------------
 
 PROMOTION_LIMIT = 256  # 半角換算。Hacker-News/x_article.py と同じ
-# X 記事の末尾にだけ置く結び（2026-10-21 藤川さんの依頼）。いいねとフォローを売り込まずに頼む
 X_CLOSING = (
     "ここまで読んでくださり、ありがとうございます。"
     "参考になった投稿があれば、いいねで教えていただけると嬉しいです。"
@@ -96,11 +228,12 @@ def prepare_promotion(candidate: str, fallback: str) -> str:
 
 
 def x_article_title(date_str: str, headline: str, count: int) -> str:
-    date_label = date_str.replace("-", "/")
+    d = dt.date.fromisoformat(date_str)
+    date_label = d.strftime("%Y/%m/%d")
     headline = " ".join(str(headline or "").split())
-    if headline:
-        return f"Reddit AIトレンド {date_label}｜{headline}"
-    return f"Reddit AIトレンド Top {count}｜{date_label}"
+    if not headline:
+        headline = f"注目記事{count}本"
+    return f"Reddit AI 注目記事 {date_label}｜{headline}"
 
 
 def build_x_article(date_str, pairs, editorial, cover_name: str | None) -> str:
@@ -117,7 +250,7 @@ def build_x_article(date_str, pairs, editorial, cover_name: str | None) -> str:
     out += ["---", "", f"# {x_article_title(date_str, editorial.get('x_headline', ''), len(pairs))}", ""]
     out += ["## 宣伝文", "", promotion, "", "## 本文", ""]
     out.append(
-        "海外の掲示板「Reddit（レディット）」の AI 関連コミュニティで、直近 24 時間に"
+        "海外の掲示板「Reddit（レディット）」の AI 関連コミュニティで、最近"
         f"話題になった投稿から {len(pairs)} 本を選び、日本語で紹介します。"
     )
     out.append("")
@@ -126,9 +259,7 @@ def build_x_article(date_str, pairs, editorial, cover_name: str | None) -> str:
 
     for i, (post, summ) in enumerate(pairs):
         n = i + 1
-        emoji = CATEGORY_EMOJI.get(summ.get("category", "Other"), "📌")
-        star = "⭐ " if n in star_picks else ""
-        out.append(f"## {n}. {star}{emoji} {summ.get('title_ja', post['title'])}")
+        out.append(f"## {n}. {summ.get('title_ja', post['title'])}")
         out.append("")
         out.append(f"r/{post['subreddit']}")
         out.append("")
@@ -172,7 +303,7 @@ def main():
         lines.append(f"total_comments: {sum(com_vals)}")
     lines.append("---")
     lines.append("")
-    lines.append(f"# 🤖 Reddit AI トレンド Top {len(pairs)}")
+    lines.append(f"# Reddit AI 注目記事 {len(pairs)}本")
     lines.append("")
     lines.append(f"**{date_str[:4]}年{date_str[5:7]}月{date_str[8:]}日**")
     lines.append("")
@@ -183,14 +314,11 @@ def main():
 
     for i, (post, summ) in enumerate(pairs):
         n = i + 1
-        cat = summ.get("category", "Other")
-        emoji = CATEGORY_EMOJI.get(cat, "📌")
         title_ja = summ.get("title_ja", post["title"])
         summary_text = summ.get("summary", "（要約なし）")
-        star = "⭐ " if n in star_picks else ""
 
         lines.append("")
-        lines.append(f"### {n}. {star}{emoji} {title_ja}")
+        lines.append(f"### {n}. {title_ja}")
         lines.append("")
         age_h = post.get("age_hours")
         lines.append(
@@ -217,6 +345,23 @@ def main():
     lines.append("*このレポートは Scheduled Task (run_reddit_gemini.py / Gemini) により自動生成されました*")
 
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    # note 原稿と表紙を先に書く。AI レポートの存在が「全部できた」の印で、
+    # 再試行は当日のレポートがあると ai を丸ごと飛ばすため（run_reddit_gemini.run_variant）。
+    # 同じ日の 2 回目（_followup）は朝の note を上書きしないよう書かない。
+    if not editorial.get("_followup"):
+        note_path = REPORT_DIR / f"{date_str}-{NOTE_FILE_STEM}-note.md"
+        write_atomic(note_path, build_note(pairs, editorial, date_str))
+        print(f"Saved: {note_path}")
+        note_cover_src = BASE / ".cache/gemini_ai_note_cover.png"
+        if note_cover_src.exists():
+            note_cover_path = note_path.with_name(note_path.name.replace("-note.md", "-cover.png"))
+            tmp = note_cover_path.with_name(note_cover_path.name + ".tmp")
+            shutil.copyfile(note_cover_src, tmp)
+            tmp.replace(note_cover_path)
+            print(f"Saved: {note_cover_path}")
+        else:
+            print("WARNING: note の表紙がありません（生成に失敗したか NOTE_COVER=0）")
+
     output_path = REPORT_DIR / f"AI_{date_str}_{hhmm}_gemini.md"
     write_atomic(output_path, "\n".join(lines))
     print(f"Saved: {output_path}")

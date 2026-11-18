@@ -38,7 +38,7 @@ DROP_REPO = "TadFuji/reddit-note-drop"
 DROP_API = f"https://api.github.com/repos/{DROP_REPO}/contents/{{name}}"
 DISPATCH_API = "https://api.github.com/repos/TadFuji/Hacker-News/actions/workflows/reddit-note.yml/dispatches"
 BRANCH = "main"
-NOTE_FILE_STEM = "Reddit-Top30"  # assemble_report_gemini.NOTE_FILE_STEM と同じ
+NOTE_FILE_STEM = "Reddit-Top30"  # assemble_ai_report_gemini.NOTE_FILE_STEM と同じ
 DEFAULT_DROP_TOKEN_FILE = "/root/reddit/.github-drop-token"
 DEFAULT_DISPATCH_ENV = "/root/ai-news-trigger/.env"
 JST = dt.timezone(dt.timedelta(hours=9), name="JST")

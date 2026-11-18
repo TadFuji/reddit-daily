@@ -58,14 +58,16 @@ class Fake:
 with tempfile.TemporaryDirectory() as t:
     out = pathlib.Path(t) / "out"
     out.mkdir()
-    (out / f"{DAY}_0605_gemini.md").write_text("std", encoding="utf-8")
+    (out / f"AI_{DAY}_0605_gemini.md").write_text("ai", encoding="utf-8")
+    (out / f"{DAY}-Reddit-Top30-note.md").write_text("note", encoding="utf-8")
     (out / f"📍 X_AI_{DAY}_0625.md").write_text("x", encoding="utf-8")
     (out / f"📍 X_AI_{DAY}_0625_cover.png").write_bytes(b"\x89PNGx")
     (out / f"{DAY}-Reddit-Top30-cover.png").write_bytes(b"\x89PNGc")
-    (out / "2026-10-29_0742_gemini.md").write_text("old day", encoding="utf-8")
+    (out / "AI_2026-10-29_0742_gemini.md").write_text("old day", encoding="utf-8")
     f = Fake()
     done = O.upload(DAY, out, "tok", request=f)
-    check("text of the day goes to reddit/DAY/", f"reddit/{DAY}/{DAY}_0605_gemini.md" in f.files
+    check("text of the day goes to reddit/DAY/", f"reddit/{DAY}/AI_{DAY}_0605_gemini.md" in f.files
+          and f"reddit/{DAY}/{DAY}-Reddit-Top30-note.md" in f.files
           and f"reddit/{DAY}/📍 X_AI_{DAY}_0625.md" in f.files)
     check("another day's file is not sent", not any("2026-10-29" in p for p in f.files))
     check("images go to the release, not git", len(f.assets) == 2 and not any(p.endswith(".png") for p in f.files))
@@ -78,8 +80,9 @@ with tempfile.TemporaryDirectory() as t:
 
     back = pathlib.Path(t) / "back"
     got = O.restore(DAY, back, "tok", request=f)
-    check("restore brings back the .md files only", sorted(got) == sorted([f"{DAY}_0605_gemini.md", f"📍 X_AI_{DAY}_0625.md"])
-          and (back / f"{DAY}_0605_gemini.md").read_text(encoding="utf-8") == "std")
+    check("restore brings back the .md files only",
+          sorted(got) == sorted([f"AI_{DAY}_0605_gemini.md", f"{DAY}-Reddit-Top30-note.md", f"📍 X_AI_{DAY}_0625.md"])
+          and (back / f"AI_{DAY}_0605_gemini.md").read_text(encoding="utf-8") == "ai")
     check("restore of an empty day is empty", O.restore("2026-11-01", back, "tok", request=Fake()) == [])
     check("belongs_to ignores hidden files", not O.belongs_to(f".{DAY}.md", DAY))
 
@@ -89,9 +92,9 @@ with tempfile.TemporaryDirectory() as t:
     f = Fake()
     failed_note = f"reddit-failed-{DAY}.md"
     f.files[f"reddit/{DAY}/{failed_note}"] = b"failed earlier"
-    f.files[f"reddit/{DAY}/{DAY}_0605_gemini.md"] = b"std"
+    f.files[f"reddit/{DAY}/AI_{DAY}_0605_gemini.md"] = b"ai"
     got = O.restore(DAY, out, "tok", request=f)
-    check("a failure note from an earlier attempt is not restored", got == [f"{DAY}_0605_gemini.md"])
+    check("a failure note from an earlier attempt is not restored", got == [f"AI_{DAY}_0605_gemini.md"])
     O.upload(DAY, out, "tok", request=f)
     check("a later success removes the stale failure note", f"reddit/{DAY}/{failed_note}" not in f.files)
     (out / failed_note).write_text("failed again", encoding="utf-8")

@@ -10,8 +10,8 @@ import unittest
 
 BASE = Path(__file__).resolve().parent
 ENTRYPOINTS = (
-    "run_reddit_gemini.py", "assemble_report_gemini.py",
-    "assemble_ai_report_gemini.py", "assemble_seminar_report_gemini.py",
+    "run_reddit_gemini.py",
+    "assemble_ai_report_gemini.py",
     "push_note_github.py",
 )
 

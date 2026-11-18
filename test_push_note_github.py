@@ -11,6 +11,7 @@ import tempfile
 
 BASE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(BASE))
+import assemble_ai_report_gemini as A  # noqa: E402
 import push_note_github as P  # noqa: E402
 
 
@@ -21,6 +22,8 @@ def check(name, cond):
 
 
 check.failed = False
+
+check("NOTE_FILE_STEM matches assemble_ai_report_gemini", P.NOTE_FILE_STEM == A.NOTE_FILE_STEM)
 
 # blob_sha matches git's own answer
 d = pathlib.Path(tempfile.mkdtemp())

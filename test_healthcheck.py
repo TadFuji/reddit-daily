@@ -30,27 +30,12 @@ check.failed = False
 
 def make_ok_stats() -> dict:
     return {
-        "standard": {
-            "note_pushed": True,
-            "sources_total": 1,
-            "sources_ok": 1,
-            "sources_rate_limited": 0,
-            "posts_fetched": 100,
-            "summaries_failed": 0,
-            "note_articles": 30,
-        },
         "ai": {
-            "sources_total": 12,
-            "sources_ok": 12,
-            "sources_rate_limited": 0,
-            "posts_fetched": 235,
-            "summaries_failed": 0,
-        },
-        "seminar": {
-            "sources_total": 10,
-            "sources_ok": 10,
-            "sources_rate_limited": 0,
-            "posts_fetched": 134,
+            "note_pushed": True,
+            "sources_total": 14,
+            "sources_ok": 14,
+            "sources_error": 0,
+            "posts_fetched": 20,
             "summaries_failed": 0,
         },
     }
@@ -58,16 +43,21 @@ def make_ok_stats() -> dict:
 
 def populate_reports(report_dir: pathlib.Path, date_str: str) -> None:
     for name in (
-        f"{date_str}_0601_gemini.md",
         f"AI_{date_str}_0621_gemini.md",
-        f"Seminar_{date_str}_0645_gemini.md",
+        f"📍 X_AI_{date_str}_0621.md",
         f"{date_str}-Reddit-Top30-note.md",
     ):
         (report_dir / name).write_text("ok", encoding="utf-8")
     (report_dir / f"{date_str}-Reddit-Top30-cover.png").write_bytes(b"\x89PNG")
 
 
-def run_hc_in_dir(root: pathlib.Path, minutes: float, ok: bool = True) -> tuple[pathlib.Path | None, str, dict]:
+def run_hc_in_dir(
+    root: pathlib.Path,
+    minutes: float,
+    ok: bool = True,
+    stats: dict | None = None,
+    skip_files: tuple[str, ...] = (),
+) -> tuple[pathlib.Path | None, str, dict]:
     report_dir = root / "out"
     base_dir = root / "base"
     cache_dir = root / "cache"
@@ -77,12 +67,15 @@ def run_hc_in_dir(root: pathlib.Path, minutes: float, ok: bool = True) -> tuple[
     cache_dir.mkdir(parents=True, exist_ok=True)
     date_str = dt.datetime.now(R.JST).strftime("%Y-%m-%d")
     populate_reports(report_dir, date_str)
+    for pattern in skip_files:
+        for p in report_dir.glob(pattern.format(date=date_str)):
+            p.unlink()
     env = {"HEALTHCHECK_DIR": str(health_dir), "HEALTHCHECK": "1", "HEALTHCHECK_NOTE": "1"}
     with mock.patch.dict(os.environ, env), \
          mock.patch.object(R, "REPORT_DIR", report_dir), \
          mock.patch.object(R, "BASE", base_dir), \
          mock.patch.object(R, "CACHE", cache_dir):
-        R.run_healthcheck(["standard", "ai", "seminar"], make_ok_stats(), ok, minutes * 60)
+        R.run_healthcheck(["ai"], stats if stats is not None else make_ok_stats(), ok, minutes * 60)
     note_path = report_dir / f"⚠️ 自動処理の異常-reddit-{date_str}.md"
     note_text = note_path.read_text(encoding="utf-8") if note_path.exists() else ""
     jsonl_path = health_dir / f"health-{date_str[:7]}.jsonl"
@@ -90,28 +83,33 @@ def run_hc_in_dir(root: pathlib.Path, minutes: float, ok: bool = True) -> tuple[
     return (note_path if note_path.exists() else None), note_text, row
 
 
-def run_hc_case(minutes: float, ok: bool = True) -> tuple[pathlib.Path | None, str, dict]:
+def run_hc_case(
+    minutes: float,
+    ok: bool = True,
+    stats: dict | None = None,
+    skip_files: tuple[str, ...] = (),
+) -> tuple[pathlib.Path | None, str, dict]:
     with tempfile.TemporaryDirectory() as tmp:
-        return run_hc_in_dir(pathlib.Path(tmp), minutes, ok=ok)
+        return run_hc_in_dir(pathlib.Path(tmp), minutes, ok=ok, stats=stats, skip_files=skip_files)
 
 
-# 1. Regression & boundary: 47.1m, 50.5m, and exact boundary 55.0m pass under 55m ceiling
-for mins in (47.1, 50.5, 55.0):
+# 1. Regression & boundary: 12.0m, 18.5m, and exact boundary 20.0m pass under 20m ceiling
+for mins in (12.0, 18.5, 20.0):
     note_p, _, row = run_hc_case(mins, ok=True)
     minutes_metric = next(m for m in row["metrics"] if m["name"] == "minutes")
     check(
-        f"{mins}m produces no warning note and ceiling is 55",
-        note_p is None and row["problems"] == [] and minutes_metric["ceiling"] == 55,
+        f"{mins}m produces no warning note and ceiling is 20",
+        note_p is None and row["problems"] == [] and minutes_metric["ceiling"] == 20,
     )
 
-# 2. Above ceiling (55.1m) triggers warning note with GitHub Actions & news-outbox wording,
+# 2. Above ceiling (20.1m) triggers warning note with GitHub Actions & news-outbox wording,
 #    and a subsequent healthy run clears the warning note via _clear_note().
 with tempfile.TemporaryDirectory() as tmp:
     root = pathlib.Path(tmp)
-    note_p, note_text, row = run_hc_in_dir(root, 55.1, ok=True)
+    note_p, note_text, row = run_hc_in_dir(root, 20.1, ok=True)
     check(
-        "55.1m triggers warning note with ceiling 55 message",
-        note_p is not None and "所要時間（分）が 55.1（上限 55 を超えました）" in note_text,
+        "20.1m triggers warning note with ceiling 20 message",
+        note_p is not None and "所要時間（分）が 20.1（上限 20 を超えました）" in note_text,
     )
     check(
         "warning note points to GitHub Actions and news-outbox (no VPS/cron.log)",
@@ -121,19 +119,33 @@ with tempfile.TemporaryDirectory() as tmp:
         and "TadFuji/reddit-daily" in note_text
         and "TadFuji/news-outbox" in note_text,
     )
-    cleared_p, _, cleared_row = run_hc_in_dir(root, 45.0, ok=True)
+    cleared_p, _, cleared_row = run_hc_in_dir(root, 10.0, ok=True)
     check(
         "subsequent healthy run clears stale warning note",
         cleared_p is None and cleared_row["problems"] == [],
     )
 
-# 3. ok=False problem message references GitHub Actions instead of cron.log;
-#    HealthCheck(where=None) keeps default behavior for sibling repos.
-_, fail_note_text, fail_row = run_hc_case(40.0, ok=False)
+# 3. AI-unified checks: X article, note, note cover, push failure, ok=False
+_, fail_note_text, fail_row = run_hc_case(10.0, ok=False)
 check(
-    "ok=False problem mentions GitHub Actions and not cron.log",
-    any("GitHub Actions" in p and "cron.log" not in p for p in fail_row["problems"])
+    "ok=False problem mentions GitHub Actions and not cron.log or 3 variants",
+    any("GitHub Actions" in p and "cron.log" not in p and "3 種類" not in p for p in fail_row["problems"])
     and "cron.log" not in fail_note_text,
+)
+missing_stats = make_ok_stats()
+missing_stats["ai"]["note_pushed"] = False
+_, _, missing_row = run_hc_case(
+    10.0,
+    ok=True,
+    stats=missing_stats,
+    skip_files=("📍 X_AI_{date}_*.md", "{date}-Reddit-Top30-note.md", "{date}-Reddit-Top30-cover.png"),
+)
+check(
+    "healthcheck checks X article, note manuscript, note cover, and push status",
+    any("X 記事" in p for p in missing_row["problems"])
+    and any("note 原稿" in p for p in missing_row["problems"])
+    and any("note 表紙" in p for p in missing_row["problems"])
+    and any("GitHub へ送れたか" in p for p in missing_row["problems"]),
 )
 check(
     "HealthCheck default where remains unchanged when omitted",

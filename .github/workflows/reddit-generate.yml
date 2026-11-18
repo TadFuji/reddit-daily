@@ -1,8 +1,8 @@
 name: Reddit generate
-# Started by the news-clock Worker (6:00 JST) or by hand. Makes the three daily
-# reports, hands the note manuscript to reddit-note-drop (the clock then starts
-# reddit-note.yml on Hacker-News) and keeps every file in news-outbox for the
-# Mac to put into Obsidian.
+# Started by the news-clock Worker (6:00 JST) or by hand. Makes the AI daily
+# report, X article/cover, and note manuscript/cover, hands the note manuscript
+# to reddit-note-drop (the clock then starts reddit-note.yml on Hacker-News)
+# and keeps every file in news-outbox for the Mac to put into Obsidian.
 # Trial runs go through reddit-trial.yml (workflow_call), so they are recorded
 # under that workflow and never look like today's production run to the clock.
 on:
@@ -30,8 +30,8 @@ jobs:
     concurrency:
       group: reddit-generate-${{ inputs.trial || 'false' }}
       cancel-in-progress: false
-    # Three attempts of up to 60 min, 10 min apart (the box's run_prod.sh), plus setup.
-    timeout-minutes: 215
+    # Three attempts of up to 31 min (30 min + 60s kill grace), 10 min apart, plus setup.
+    timeout-minutes: 120
     env:
       TZ: Asia/Tokyo
       PYTHONUTF8: "1"
@@ -63,14 +63,16 @@ jobs:
           mkdir -p "$REDDIT_OUT_DIR"
 
       - name: Install dependencies
-        run: pip install defusedxml==0.7.1 google-genai==2.20.0 pillow==12.3.0
+        run: pip install google-genai==2.20.0 pillow==12.3.0
 
       - name: Self-check (offline)
         run: |
+          python test_fetch_data.py
           python test_push_note_github.py
           python test_note_article.py
           python test_x_article.py
           python test_healthcheck.py
+          python test_output_paths.py
           python tools/test_outbox.py
 
       - name: Restore today's reports and the health history from news-outbox
@@ -97,7 +99,7 @@ jobs:
           export REDDIT_DROP_TOKEN_FILE="$drop"
           ok=0
           for attempt in 1 2 3; do
-            if timeout -k 60 3600 python run_reddit_gemini.py all; then ok=1; break; fi
+            if timeout -k 60 1800 python run_reddit_gemini.py all; then ok=1; break; fi
             echo "::warning::attempt $attempt failed"
             [ "$attempt" -lt 3 ] && sleep 600
           done
