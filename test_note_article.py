@@ -105,39 +105,55 @@ with tempfile.TemporaryDirectory() as rv_tmp:
     cover_calls = []
     orig_rv = (R.CACHE, R.REPORT_DIR, R.step2_summaries, R.step3_editorial,
                R.step3_x_cover, R.step3_note_cover, R.step4_assemble)
-    R.CACHE = rv_cache
-    R.REPORT_DIR = rv_out
-    R.step2_summaries = lambda v, ps: (ps, [summary(1), summary(2), summary(3)])
-    R.step3_editorial = lambda v, ss, fu: cover_calls.append(("editorial", fu))
-    R.step3_x_cover = lambda ss: cover_calls.append(("x_cover",))
-    R.step3_note_cover = lambda ss: cover_calls.append(("note_cover",))
-    R.step4_assemble = lambda v: cover_calls.append(("assemble", v))
-    st = {}
-    ok_rv = R.run_variant("ai", skip_fetch=True, stats=st)
-    check(
-        "run_variant('ai') runs editorial, x_cover, note_cover, assemble when not followup",
-        ok_rv and cover_calls == [("editorial", False), ("x_cover",), ("note_cover",), ("assemble", "ai")],
-    )
-    # Simulate follow-up run (earlier report already exists with p1)
-    (rv_out / f"AI_{R.dt.datetime.now(R.JST).strftime('%Y-%m-%d')}_0600_gemini.md").write_text(
-        "https://www.reddit.com/r/artificial/comments/p1/t/", encoding="utf-8"
-    )
-    (rv_cache / "ai_data.json").write_text(json.dumps({
-        "date": "2026-10-12",
-        "generated_at": "2026-10-12T12:00:00+09:00",
-        "sources_total": 14,
-        "sources_ok": 14,
-        "sources_error": 0,
-        "total_fetched": 4,
-        "posts": [post(1), post(2), post(3), post(4)],
-    }), encoding="utf-8")
-    cover_calls.clear()
-    ok_fu = R.run_variant("ai", skip_fetch=True, stats={})
-    check(
-        "run_variant('ai') skips note_cover on followup run",
-        ok_fu and cover_calls == [("editorial", True), ("x_cover",), ("assemble", "ai")],
-    )
-    R.CACHE, R.REPORT_DIR, R.step2_summaries, R.step3_editorial, R.step3_x_cover, R.step3_note_cover, R.step4_assemble = orig_rv
+    prev_skip_done = os.environ.pop("REDDIT_SKIP_DONE", None)
+    try:
+        R.CACHE = rv_cache
+        R.REPORT_DIR = rv_out
+        R.step2_summaries = lambda v, ps: (ps, [summary(1), summary(2), summary(3)])
+        R.step3_editorial = lambda v, ss, fu: cover_calls.append(("editorial", fu))
+        R.step3_x_cover = lambda ss: cover_calls.append(("x_cover",))
+        R.step3_note_cover = lambda ss: cover_calls.append(("note_cover",))
+        R.step4_assemble = lambda v: cover_calls.append(("assemble", v))
+        st = {}
+        ok_rv = R.run_variant("ai", skip_fetch=True, stats=st)
+        check(
+            "run_variant('ai') runs editorial, x_cover, note_cover, assemble when not followup",
+            ok_rv and cover_calls == [("editorial", False), ("x_cover",), ("note_cover",), ("assemble", "ai")],
+        )
+        # Simulate follow-up run (earlier report already exists with p1)
+        (rv_out / f"AI_{R.dt.datetime.now(R.JST).strftime('%Y-%m-%d')}_0600_gemini.md").write_text(
+            "https://www.reddit.com/r/artificial/comments/p1/t/", encoding="utf-8"
+        )
+        (rv_cache / "ai_data.json").write_text(json.dumps({
+            "date": "2026-10-12",
+            "generated_at": "2026-10-12T12:00:00+09:00",
+            "sources_total": 14,
+            "sources_ok": 14,
+            "sources_error": 0,
+            "total_fetched": 4,
+            "posts": [post(1), post(2), post(3), post(4)],
+        }), encoding="utf-8")
+        cover_calls.clear()
+        ok_fu = R.run_variant("ai", skip_fetch=True, stats={})
+        check(
+            "run_variant('ai') skips note_cover on followup run",
+            ok_fu and cover_calls == [("editorial", True), ("x_cover",), ("assemble", "ai")],
+        )
+        # Verify REDDIT_SKIP_DONE=1 skips when today's report already exists
+        os.environ["REDDIT_SKIP_DONE"] = "1"
+        cover_calls.clear()
+        st_skip = {}
+        ok_skip = R.run_variant("ai", skip_fetch=True, stats=st_skip)
+        check(
+            "run_variant('ai') skips when REDDIT_SKIP_DONE=1 and today's report exists",
+            ok_skip and st_skip.get("ai", {}).get("skipped") is True and cover_calls == [],
+        )
+    finally:
+        R.CACHE, R.REPORT_DIR, R.step2_summaries, R.step3_editorial, R.step3_x_cover, R.step3_note_cover, R.step4_assemble = orig_rv
+        if prev_skip_done is None:
+            os.environ.pop("REDDIT_SKIP_DONE", None)
+        else:
+            os.environ["REDDIT_SKIP_DONE"] = prev_skip_done
 
     # main() accepts both 'ai' and 'all', pushes note after ai, and checks REDDIT_REQUIRE_PUSH
     for target in ("ai", "all"):
