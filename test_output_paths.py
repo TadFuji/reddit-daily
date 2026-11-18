@@ -37,7 +37,7 @@ class OutputPathTests(unittest.TestCase):
                             if override is not None:
                                 env["REDDIT_OUT_DIR"] = override
                             script = """
-import pathlib, runpy, sys
+import pathlib, runpy, sys, urllib.request
 sys.platform = sys.argv[2]
 if sys.platform == "linux":
     pathlib.Path.home = classmethod(lambda cls: pathlib.Path("/root"))
