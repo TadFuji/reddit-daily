@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """run_reddit_gemini.py — Reddit AI buzz report pipeline on Gemini.
 
-Runs the AI-only pipeline (Google Search Grounding -> Gemini summaries &
+Runs the AI-only pipeline (Arctic Shift API -> Gemini summaries &
 editorial -> X cover & note cover -> AI report, X article, and note manuscript):
 
   Step 1   fetch_data.py -> .cache/ai_data.json

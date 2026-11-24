@@ -1,12 +1,27 @@
 # reddit-daily
 
-Reddit の話題を日本語でまとめる 3 本のレポート（標準・AI・セミナー）と、note の「Reddit 日本語解説」の原稿・表紙を、毎朝 GitHub Actions で作るリポジトリです。
+Reddit の AI 関連コミュニティの話題を日本語でまとめるレポート一式（Obsidian 用 AI レポート・X 用記事/表紙・note 用原稿/表紙）を、毎朝 GitHub Actions で生成するリポジトリです。
 
-- 起動：時刻係（Cloudflare の `news-clock`）が毎朝 6:00 ごろに `reddit-generate.yml` を起動します。手で起動することもできます。
-- 公開：できた note 原稿を `TadFuji/reddit-note-drop` に置きます。note への公開は、時刻係が別のワークフローを起動して行います。
-- 保管：できたファイルは非公開の `TadFuji/news-outbox` に置き、Mac が起きているときに Obsidian へ取り込みます。
-- 試験：`reddit-trial.yml` を起動すると、受け渡しをせず、保管先も `reddit-trial/` に分けます。本番の記録とは別のワークフローとして残るので、時刻係の判断に混ざりません。切り替え前の確認のため、2026-10-31〜11-03 は毎日 10:17（日本時間）に自動でも動きます（11/4 からは自動では何もしません）。この期間は、同じ日に手で起動しないでください（その日の自動の回が何もせずに終わります）。
+## 仕組み
+- **起動**：時刻係（Cloudflare Worker `news-clock`）が毎朝 6:00 JST ごろに `reddit-generate.yml` を起動します（手動実行も可）。
+- **データ取得（`fetch_data.py`）**：無料の公開アーカイブ **Arctic Shift API**（`arctic-shift.photon-reddit.com`）から `config_ai.json` の 14 サブレディット（直近 48 時間）と選定投稿の上位コメントを取得します（API キー・Google Search Grounding 不要、取得費用 `¥0`）。
+- **要約・記事生成（`run_reddit_gemini.py` / `assemble_ai_report_gemini.py`）**：Gemini API（`gemini-4-hydrogen` / `gemini-nano-banana-2.1`）で日本語要約・編集レビュー・表紙画像を生成します。
+- **公開・保管**：note 原稿と表紙を `TadFuji/reddit-note-drop` に渡し、`TadFuji/news-outbox`（`reddit/`）へ保管して Mac 側で Obsidian に取り込みます。
+- **試験実行（`reddit-trial.yml`）**：`note` への受け渡しを行わず、保管先も `reddit-trial/` に分けて動作検証できます。
 
-鍵（GitHub の Secrets）：`GEMINI_API_KEY`、`GEMINI_IMAGE_API_KEY`、`DROP_TOKEN`（reddit-note-drop の書き込み）、`OUTBOX_TOKEN`（news-outbox の書き込み）。
+## テストとロールバック
+```bash
+# オフラインテスト（API キー・通信不要）
+.venv/bin/python test_fetch_data.py
+.venv/bin/python test_push_note_github.py
+.venv/bin/python test_note_article.py
+.venv/bin/python test_x_article.py
+.venv/bin/python test_healthcheck.py
+.venv/bin/python test_output_paths.py
+.venv/bin/python tools/test_outbox.py
 
-コードは 2026-10-25〜29 に Grok Bot の box で本番に使っていた版を元にしています。
+# 本番反映を元に戻す場合
+git revert <commit_sha>
+```
+
+鍵（GitHub Secrets）：`GEMINI_API_KEY`、`GEMINI_IMAGE_API_KEY`、`DROP_TOKEN`（`reddit-note-drop` 書き込み）、`OUTBOX_TOKEN`（`news-outbox` 書き込み）。
