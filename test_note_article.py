@@ -42,11 +42,13 @@ def summary(i):
 # ---------------------------------------------------------------------------
 calls = []
 prompts = []
+gemini_kwargs = []
 
 
-def fake_gemini(prompt, label, cache_stem=None):
+def fake_gemini(prompt, label, cache_stem=None, **kwargs):
     calls.append(cache_stem)
     prompts.append(prompt)
+    gemini_kwargs.append(kwargs)
     if cache_stem and cache_stem.endswith("_step3"):
         return {
             "editors_note": "今日のRedditはAI話題が中心でした。",
@@ -73,8 +75,13 @@ posts = [post(1), post(2), post(3)]
 used, summ = R.step2_summaries("ai", posts)
 check("step2: AI report summarizes every post", len(used) == len(summ) == 3 and len(calls) == 3)
 check("step2: failed summary becomes FAIL_ENTRY", summ[1] == R.FAIL_ENTRY)
+check(
+    "step2: passes static rules via system_instruction and uses per-article thinking",
+    all(bool(kw.get("system_instruction")) and kw.get("thinking_level") is None for kw in gemini_kwargs),
+)
 
 prompts.clear()
+gemini_kwargs.clear()
 R.step3_editorial("ai", summ, followup=False)
 step3_saved = json.loads((tmp_cache / "gemini_ai_step3.json").read_text(encoding="utf-8"))
 check(
@@ -82,7 +89,8 @@ check(
     len(prompts) == 1
     and all(k in prompts[0] for k in ("editors_note", "x_headline", "x_promotion", "note_catch", "note_points", "note_extra_hashtags", "closing_comment"))
     and step3_saved.get("_followup") is False
-    and step3_saved.get("note_catch") == "Claudeの新機能",
+    and step3_saved.get("note_catch") == "Claudeの新機能"
+    and gemini_kwargs[0].get("thinking_level") == R.GEMINI_EDITORIAL_THINKING_LEVEL,
 )
 R.gemini_json, R.CACHE, R.writing_norms = orig
 
@@ -117,8 +125,8 @@ with tempfile.TemporaryDirectory() as rv_tmp:
         st = {}
         ok_rv = R.run_variant("ai", skip_fetch=True, stats=st)
         check(
-            "run_variant('ai') runs editorial, x_cover, note_cover, assemble when not followup",
-            ok_rv and cover_calls == [("editorial", False), ("x_cover",), ("note_cover",), ("assemble", "ai")],
+            "run_variant('ai') runs editorial, note_cover, x_cover, assemble when not followup",
+            ok_rv and cover_calls == [("editorial", False), ("note_cover",), ("x_cover",), ("assemble", "ai")],
         )
         # Simulate follow-up run (earlier report already exists with p1)
         (rv_out / f"AI_{R.dt.datetime.now(R.JST).strftime('%Y-%m-%d')}_0600_gemini.md").write_text(
@@ -184,6 +192,30 @@ check("hashtags: fixed tags agree between generator and assembler",
 check("file stem agrees between generator and assembler", R.NOTE_FILE_STEM == A.NOTE_FILE_STEM == "Reddit-Top30")
 check("AI prompt formats", "title_ja" in R.AI_PROMPT.format(
     comment_rule="", post_data="x", writing_norms=""))
+# Verify step3_x_cover derives 2560x1024 X cover from note cover without calling x_cover
+try:
+    from PIL import Image
+    import x_cover as _xc
+    with tempfile.TemporaryDirectory() as xc_tmp:
+        xc_cache = pathlib.Path(xc_tmp)
+        Image.new("RGB", (1280, 670), (242, 234, 218)).save(xc_cache / "gemini_ai_note_cover.png")
+        orig_xc_cache = R.CACHE
+        orig_make_cover = _xc.make_cover
+        called = []
+        _xc.make_cover = lambda *a, **k: (called.append(True), False)[1]
+        try:
+            R.CACHE = xc_cache
+            R.step3_x_cover([summary(1)])
+        finally:
+            R.CACHE = orig_xc_cache
+            _xc.make_cover = orig_make_cover
+        derived = xc_cache / "gemini_ai_cover.png"
+        check(
+            "step3_x_cover reuses note cover with pad_cover_for_x (0 extra API calls)",
+            not called and derived.exists() and Image.open(derived).size == (2560, 1024),
+        )
+except ImportError:
+    pass
 
 
 # ---------------------------------------------------------------------------

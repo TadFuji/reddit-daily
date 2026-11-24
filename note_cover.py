@@ -17,6 +17,8 @@ from __future__ import annotations
 import datetime as dt
 import io
 import os
+import pathlib
+import statistics
 import time
 
 try:
@@ -109,7 +111,8 @@ def generate(prompt: str) -> bytes | None:
     client = genai.Client(api_key=api_key)
     config = types.GenerateContentConfig(
         response_modalities=["Image"],
-        image_config=types.ImageConfig(aspect_ratio=COVER_RAW_ASPECT, image_size="2K"),
+        image_config=types.ImageConfig(aspect_ratio=COVER_RAW_ASPECT, image_size="1K"),
+        thinking_config=types.ThinkingConfig(thinking_level="minimal"),
     )
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
@@ -117,7 +120,7 @@ def generate(prompt: str) -> bytes | None:
             for cand in resp.candidates or []:
                 for part in (cand.content.parts if cand.content else None) or []:
                     if getattr(part, "inline_data", None) and part.inline_data.data:
-                        meter.record_image(COVER_MODEL, label="note-cover")
+                        meter.record_image(COVER_MODEL, label="note-cover", image_size="1K", response=resp)
                         return crop_to_cover(part.inline_data.data)
             reason = "response contained no image data"
         except Exception as e:
@@ -145,4 +148,42 @@ def make_cover(article_text: str, out_path) -> bool:
         return True
     except Exception as e:
         log(f"WARNING: 表紙を作れませんでした: {type(e).__name__}: {str(e)[:200]}")
+        return False
+
+
+def pad_cover_for_x(src_path, dst_path) -> bool:
+    """Derive a 2560x1024 X banner by framing the 1280x670 note cover cleanly."""
+    try:
+        from PIL import Image
+
+        src = pathlib.Path(src_path)
+        dst = pathlib.Path(dst_path)
+        with Image.open(src) as raw:
+            img = raw.convert("RGB")
+        w, h = img.size
+        px = img.load()
+        edges = (
+            [px[x, 0] for x in range(w)]
+            + [px[x, h - 1] for x in range(w)]
+            + [px[0, y] for y in range(h)]
+            + [px[w - 1, y] for y in range(h)]
+        )
+        bg = tuple(int(statistics.median(c[i] for c in edges)) for i in range(3))
+
+        target_w, target_h = 2560, 1024
+        fit_w = round(w * (target_h / h))
+        fitted = img.resize((fit_w, target_h), Image.Resampling.LANCZOS)
+        if fit_w > target_w:
+            left = (fit_w - target_w) // 2
+            fitted = fitted.crop((left, 0, left + target_w, target_h))
+            canvas = fitted
+        else:
+            canvas = Image.new("RGB", (target_w, target_h), bg)
+            canvas.paste(fitted, ((target_w - fit_w) // 2, 0))
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        canvas.save(dst, "PNG")
+        log(f"X cover derived from note cover: {dst.name} ({dst.stat().st_size} bytes)")
+        return True
+    except Exception as e:
+        log(f"WARNING: note 表紙から X カバー変換に失敗: {type(e).__name__}: {str(e)[:200]}")
         return False

@@ -93,23 +93,23 @@ def run_hc_case(
         return run_hc_in_dir(pathlib.Path(tmp), minutes, ok=ok, stats=stats, skip_files=skip_files)
 
 
-# 1. Regression & boundary: 12.0m, 18.5m, and exact boundary 20.0m pass under 20m ceiling
-for mins in (12.0, 18.5, 20.0):
+# 1. Regression & boundary: 12.0m, 18.5m, and exact boundary 25.0m pass under 25m ceiling
+for mins in (12.0, 18.5, 25.0):
     note_p, _, row = run_hc_case(mins, ok=True)
     minutes_metric = next(m for m in row["metrics"] if m["name"] == "minutes")
     check(
-        f"{mins}m produces no warning note and ceiling is 20",
-        note_p is None and row["problems"] == [] and minutes_metric["ceiling"] == 20,
+        f"{mins}m produces no warning note and ceiling is 25",
+        note_p is None and row["problems"] == [] and minutes_metric["ceiling"] == 25,
     )
 
-# 2. Above ceiling (20.1m) triggers warning note with GitHub Actions & news-outbox wording,
+# 2. Above ceiling (25.1m) triggers warning note with GitHub Actions & news-outbox wording,
 #    and a subsequent healthy run clears the warning note via _clear_note().
 with tempfile.TemporaryDirectory() as tmp:
     root = pathlib.Path(tmp)
-    note_p, note_text, row = run_hc_in_dir(root, 20.1, ok=True)
+    note_p, note_text, row = run_hc_in_dir(root, 25.1, ok=True)
     check(
-        "20.1m triggers warning note with ceiling 20 message",
-        note_p is not None and "所要時間（分）が 20.1（上限 20 を超えました）" in note_text,
+        "25.1m triggers warning note with ceiling 25 message",
+        note_p is not None and "所要時間（分）が 25.1（上限 25 を超えました）" in note_text,
     )
     check(
         "warning note points to GitHub Actions and news-outbox (no VPS/cron.log)",
@@ -153,7 +153,7 @@ check(
 )
 
 
-# 4. gemini_json passes thinking_level="MEDIUM" by default, and omits it when empty
+# 4. gemini_json passes thinking_level="LOW" by default, and omits it when empty
 @contextlib.contextmanager
 def genai_types_context():
     try:
@@ -241,20 +241,36 @@ with genai_types_context():
     lvl = getattr(getattr(cfg, "thinking_config", None), "thinking_level", None)
     lvl_val = getattr(lvl, "value", lvl)
     tier_val = getattr(getattr(cfg, "service_tier", None), "value", getattr(cfg, "service_tier", None))
-    check("default GEMINI_THINKING_LEVEL is MEDIUM", R.GEMINI_THINKING_LEVEL == "MEDIUM")
+    check("default GEMINI_THINKING_LEVEL is LOW", R.GEMINI_THINKING_LEVEL == "LOW")
+    check("default GEMINI_EDITORIAL_THINKING_LEVEL is MEDIUM", R.GEMINI_EDITORIAL_THINKING_LEVEL == "MEDIUM")
     check("default GEMINI_SERVICE_TIER is flex", R.GEMINI_SERVICE_TIER == "flex")
     check(
-        "gemini_json passes thinking_level=MEDIUM, service_tier=flex, 35s http_options, and bills 50%",
+        "gemini_json passes thinking_level=LOW, service_tier=flex, 150s http_options, and bills 50%",
         res == {"ok": True}
         and cfg.thinking_config is not None
-        and lvl_val == "MEDIUM"
+        and lvl_val == "LOW"
         and tier_val == "flex"
-        and R.FLEX_TIMEOUT_MS == 35000
+        and R.FLEX_TIMEOUT_MS == 150000
         and R.FLEX_DEADLINE_SECONDS == 1500
         and getattr(cfg.http_options, "timeout", None) == R.FLEX_TIMEOUT_MS
         and cfg.response_mime_type == "application/json"
         and cfg.temperature == 0.3
         and abs(um_flex.totals()["usd"] - 4.5) < 1e-6,
+    )
+
+    R.reset_flex_state()
+    fake_ed = FakeClient()
+    with mock.patch.object(R, "gemini_client", return_value=fake_ed), \
+         mock.patch.object(R, "resolve_model", return_value="gemini-4-hydrogen"), \
+         mock.patch.object(R, "meter", mock.Mock()):
+        res_ed = R.gemini_json("prompt", "test", thinking_level="MEDIUM", system_instruction="SYS")
+    cfg_ed = fake_ed.models.configs[0]
+    lvl_ed = getattr(getattr(cfg_ed, "thinking_config", None), "thinking_level", None)
+    check(
+        "gemini_json passes explicit thinking_level=MEDIUM and system_instruction",
+        res_ed == {"ok": True}
+        and getattr(lvl_ed, "value", lvl_ed) == "MEDIUM"
+        and cfg_ed.system_instruction == "SYS",
     )
 
     R.reset_flex_state()
@@ -273,16 +289,20 @@ with genai_types_context():
         and cfg2.temperature == 0.3,
     )
 
-    # Flex 503 immediate fallback to Standard + 2-strike circuit breaker + Standard billing
+    # Flex 503 per-call fallback to Standard + cumulative failure breaker + Standard billing
     R.reset_flex_state()
     um_fb = U.UsageMeter()
     um_fb.enabled = True
     with mock.patch.object(R.time, "sleep") as mock_sleep, \
          mock.patch.object(R, "resolve_model", return_value="gemini-4-hydrogen"), \
+         mock.patch.object(R, "FLEX_MAX_TOTAL_FAILURES", 2), \
          mock.patch.object(R, "meter", um_fb):
         fake_fb1 = FakeClient(fail_first_n=1)
         with mock.patch.object(R, "gemini_client", return_value=fake_fb1):
             res_fb1 = R.gemini_json("prompt", "test")
+        fake_ok_mid = FakeClient()
+        with mock.patch.object(R, "gemini_client", return_value=fake_ok_mid):
+            res_mid = R.gemini_json("prompt", "test")
         fake_fb2 = FakeClient(fail_first_n=1)
         with mock.patch.object(R, "gemini_client", return_value=fake_fb2):
             res_fb2 = R.gemini_json("prompt", "test")
@@ -290,17 +310,20 @@ with genai_types_context():
         with mock.patch.object(R, "gemini_client", return_value=fake_after):
             res_after = R.gemini_json("prompt", "test")
     check(
-        "Flex failure falls back immediately to Standard and disables Flex after 2 consecutive failures",
+        "Flex failure falls back to Standard for that call and disables Flex at FLEX_MAX_TOTAL_FAILURES",
         res_fb1 == {"ok": True}
+        and res_mid == {"ok": True}
         and res_fb2 == {"ok": True}
         and res_after == {"ok": True}
         and getattr(fake_fb1.models.configs[0], "service_tier", None) is not None
         and getattr(fake_fb1.models.configs[1], "service_tier", None) is None
         and getattr(fake_fb1.models.configs[1], "http_options", None) is None
+        and getattr(fake_ok_mid.models.configs[0], "service_tier", None) is not None
+        and R._FLEX_STATE["total_failures"] == 2
         and R._FLEX_STATE["disabled"] is True
         and getattr(fake_after.models.configs[0], "service_tier", None) is None
         and mock_sleep.call_args_list == [mock.call(1), mock.call(1)]
-        and abs(um_fb.totals()["usd"] - 27.0) < 1e-6,
+        and abs(um_fb.totals()["usd"] - 31.5) < 1e-6,
     )
 
     # Deadline circuit breaker
@@ -318,15 +341,13 @@ with genai_types_context():
         and getattr(fake_dl.models.configs[0], "service_tier", None) is None,
     )
 
-    # Total failures breaker (FLEX_MAX_TOTAL_FAILURES = 4 without 2 consecutive failures)
+    # Default FLEX_MAX_TOTAL_FAILURES = 8 allows occasional blips without killing Flex
     R.reset_flex_state()
     with mock.patch.object(R.time, "sleep"), \
          mock.patch.object(R, "resolve_model", return_value="gemini-4-hydrogen"), \
          mock.patch.object(R, "meter", mock.Mock()):
-        for step in range(3):
+        for _ in range(7):
             with mock.patch.object(R, "gemini_client", return_value=FakeClient(fail_first_n=1)):
-                R.gemini_json("prompt", "test")
-            with mock.patch.object(R, "gemini_client", return_value=FakeClient()):
                 R.gemini_json("prompt", "test")
         assert R._FLEX_STATE["disabled"] is False
         with mock.patch.object(R, "gemini_client", return_value=FakeClient(fail_first_n=1)):
@@ -335,67 +356,11 @@ with genai_types_context():
         with mock.patch.object(R, "gemini_client", return_value=fake_total_after):
             R.gemini_json("prompt", "test")
     check(
-        "FLEX_MAX_TOTAL_FAILURES=4 disables Flex even when failures are non-consecutive",
-        R._FLEX_STATE["total_failures"] == 4
+        "FLEX_MAX_TOTAL_FAILURES=8 disables Flex after 8 failures",
+        R.FLEX_MAX_TOTAL_FAILURES == 8
+        and R._FLEX_STATE["total_failures"] == 8
         and R._FLEX_STATE["disabled"] is True
         and getattr(fake_total_after.models.configs[0], "service_tier", None) is None,
-    )
-
-    # Slow-success latency breaker (3 consecutive slow >25s Flex responses disable Flex)
-    class SlowFakeModels(FakeModels):
-        def __init__(self, clock_state, step_seconds: float) -> None:
-            super().__init__()
-            self.clock_state = clock_state
-            self.step_seconds = step_seconds
-
-        def generate_content(self, **kw):
-            self.clock_state["t"] += self.step_seconds
-            return super().generate_content(**kw)
-
-    class SlowFakeClient:
-        def __init__(self, clock_state, step_seconds: float) -> None:
-            self.models = SlowFakeModels(clock_state, step_seconds)
-
-    clock_streak = {"t": 0.0}
-    with mock.patch.object(R.time, "monotonic", side_effect=lambda: clock_streak["t"]), \
-         mock.patch.object(R, "resolve_model", return_value="gemini-4-hydrogen"), \
-         mock.patch.object(R, "meter", mock.Mock()):
-        R.reset_flex_state()
-        slow_client = SlowFakeClient(clock_streak, R.FLEX_SLOW_THRESHOLD_SECONDS + 1.0)
-        with mock.patch.object(R, "gemini_client", return_value=slow_client):
-            for _ in range(4):
-                R.gemini_json("prompt", "test")
-    check(
-        "Slow-success streak breaker (3 calls >25s) switches remaining calls to Standard",
-        len(slow_client.models.configs) == 4
-        and getattr(slow_client.models.configs[2], "service_tier", None) is not None
-        and getattr(slow_client.models.configs[3], "service_tier", None) is None
-        and R._FLEX_STATE["slow_streak"] == 3
-        and R._FLEX_STATE["disabled"] is True,
-    )
-
-    # Slow-success total breaker (6 non-consecutive slow calls disable Flex)
-    clock_total = {"t": 0.0}
-    with mock.patch.object(R.time, "monotonic", side_effect=lambda: clock_total["t"]), \
-         mock.patch.object(R, "resolve_model", return_value="gemini-4-hydrogen"), \
-         mock.patch.object(R, "meter", mock.Mock()):
-        R.reset_flex_state()
-        slow_c = SlowFakeClient(clock_total, R.FLEX_SLOW_THRESHOLD_SECONDS + 1.0)
-        fast_c = SlowFakeClient(clock_total, 2.0)
-        for _ in range(3):
-            with mock.patch.object(R, "gemini_client", return_value=slow_c):
-                R.gemini_json("prompt", "test")
-                R.gemini_json("prompt", "test")
-            with mock.patch.object(R, "gemini_client", return_value=fast_c):
-                R.gemini_json("prompt", "test")
-        after_slow_total = FakeClient()
-        with mock.patch.object(R, "gemini_client", return_value=after_slow_total):
-            R.gemini_json("prompt", "test")
-    check(
-        "Slow-success total breaker (6 slow calls) switches remaining calls to Standard",
-        R._FLEX_STATE["slow_total"] == 6
-        and R._FLEX_STATE["disabled"] is True
-        and getattr(after_slow_total.models.configs[0], "service_tier", None) is None,
     )
 
     # GEMINI_SERVICE_TIER="standard" disables Flex from the start
@@ -432,13 +397,23 @@ check(
     and ("第一段落" * 51) not in dig_ai
     and "短い第一段落" in dig_ai,
 )
+many = [{"title_ja": f"見出し{i}", "summary": f"本文{i}"} for i in range(10)]
+dig_capped = R._cover_digest_text(many)
+check(
+    "_cover_digest_text caps output at top 6 stories",
+    "見出し5" in dig_capped and "見出し6" not in dig_capped,
+)
+um_1k = U.UsageMeter()
+um_1k.enabled = True
+um_1k.record_image("gemini-nano-banana-2.1", label="note-cover", image_size="1K")
+check("UsageMeter bills 1K image as $0.0336", abs(um_1k.totals()["usd"] - 0.0336) < 1e-6)
 
 # 6. Environment variable parsing of GEMINI_THINKING_LEVEL (unset / whitespace / blank)
 with tempfile.TemporaryDirectory() as tmp:
     out_override = str(pathlib.Path(tmp) / "out")
     for label, env_val, expected in (
-        ("unset -> MEDIUM", None, "MEDIUM"),
-        ("padded LOW -> LOW", "  LOW  ", "LOW"),
+        ("unset -> LOW", None, "LOW"),
+        ("padded MEDIUM -> MEDIUM", "  MEDIUM  ", "MEDIUM"),
         ("whitespace -> empty", "   ", ""),
     ):
         env_patch = {"USAGE_METER": "0", "REDDIT_OUT_DIR": out_override}

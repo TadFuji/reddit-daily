@@ -3,9 +3,9 @@
 Reddit の AI 関連コミュニティの話題を日本語でまとめるレポート一式（Obsidian 用 AI レポート・X 用記事/表紙・note 用原稿/表紙）を、毎朝 GitHub Actions で生成するリポジトリです。
 
 ## 仕組み
-- **起動**：時刻係（Cloudflare Worker `news-clock`）が毎朝 6:00 JST ごろに `reddit-generate.yml` を起動します（手動実行も可）。
+- **起動**：時刻係（Cloudflare Worker `news-clock`）が毎朝 6:20 JST ごろに `reddit-generate.yml` を起動します（HN との同時実行を避けるため 2026-11-24 に 6:00 から変更。手動実行も可）。
 - **データ取得（`fetch_data.py`）**：無料の公開アーカイブ **Arctic Shift API**（`arctic-shift.photon-reddit.com`）から `config_ai.json` の 14 サブレディット（直近 48 時間）と選定投稿の上位コメントを取得します（API キー・Google Search Grounding 不要、取得費用 `¥0`）。
-- **要約・記事生成（`run_reddit_gemini.py` / `assemble_ai_report_gemini.py`）**：Gemini API（`gemini-4-hydrogen` / `gemini-nano-banana-2.1`）で日本語要約・編集レビュー・表紙画像を生成します。
+- **要約・記事生成（`run_reddit_gemini.py` / `assemble_ai_report_gemini.py`）**：Gemini API（`gemini-4-hydrogen` 要約 `LOW` / 総括 `MEDIUM`、Flex 推論・150秒上限・累計8回失敗で退避、`gemini-nano-banana-2.1` `1K` + `thinking_level=minimal`）で日本語要約・編集レビュー・表紙画像を生成し、通常回では note 表紙から X カバー画像を余白付き変換で共有します（画像生成 1 枚/日）。
 - **公開・保管**：note 原稿と表紙を `TadFuji/reddit-note-drop` に渡し、`TadFuji/news-outbox`（`reddit/`）へ保管して Mac 側で Obsidian に取り込みます。
 - **試験実行（`reddit-trial.yml`）**：`note` への受け渡しを行わず、保管先も `reddit-trial/` に分けて動作検証できます。
 

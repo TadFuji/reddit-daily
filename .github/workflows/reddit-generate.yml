@@ -1,5 +1,5 @@
 name: Reddit generate
-# Started by the news-clock Worker (6:00 JST) or by hand. Makes the AI daily
+# Started by the news-clock Worker (6:20 JST) or by hand. Makes the AI daily
 # report, X article/cover, and note manuscript/cover, hands the note manuscript
 # to reddit-note-drop (the clock then starts reddit-note.yml on Hacker-News)
 # and keeps every file in news-outbox for the Mac to put into Obsidian.

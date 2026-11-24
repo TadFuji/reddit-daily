@@ -49,7 +49,8 @@ except ImportError:
 
 BASE = pathlib.Path(__file__).resolve().parent
 CACHE = BASE / ".cache"
-WRITING_NORMS = BASE / "skills" / "japanese-tech-writing" / "SKILL.md"
+WRITING_NORMS = BASE / "skills" / "japanese-tech-writing" / "NEWS-SUMMARY.md"
+WRITING_NORMS_FALLBACK = BASE / "skills" / "japanese-tech-writing" / "SKILL.md"
 ENV_FILE = BASE / ".env"
 
 
@@ -81,14 +82,11 @@ os.environ["REDDIT_OUT_DIR"] = str(REPORT_DIR)
 JST = dt.timezone(dt.timedelta(hours=9), name="JST")
 
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-4-hydrogen")
-GEMINI_THINKING_LEVEL = os.environ.get("GEMINI_THINKING_LEVEL", "MEDIUM").strip()
+GEMINI_THINKING_LEVEL = os.environ.get("GEMINI_THINKING_LEVEL", "LOW").strip()
+GEMINI_EDITORIAL_THINKING_LEVEL = os.environ.get("GEMINI_EDITORIAL_THINKING_LEVEL", "MEDIUM").strip()
 GEMINI_SERVICE_TIER = os.environ.get("GEMINI_SERVICE_TIER", "flex").strip().lower()
-FLEX_TIMEOUT_MS = int(os.environ.get("REDDIT_FLEX_TIMEOUT_MS", "35000"))
-FLEX_MAX_STREAK_FAILURES = 2
-FLEX_MAX_TOTAL_FAILURES = 4
-FLEX_SLOW_THRESHOLD_SECONDS = float(os.environ.get("REDDIT_FLEX_SLOW_SECONDS", "25"))
-FLEX_MAX_SLOW_STREAK = 3
-FLEX_MAX_SLOW_TOTAL = 6
+FLEX_TIMEOUT_MS = int(os.environ.get("REDDIT_FLEX_TIMEOUT_MS", "150000"))
+FLEX_MAX_TOTAL_FAILURES = int(os.environ.get("REDDIT_FLEX_MAX_TOTAL_FAILURES", "8"))
 FLEX_DEADLINE_SECONDS = int(os.environ.get("REDDIT_FLEX_DEADLINE_SECONDS", "1500"))
 GEMINI_FALLBACK_CANDIDATES = ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash"]
 MAX_CALL_RETRIES = 3
@@ -118,21 +116,15 @@ _MODEL = None
 
 _FLEX_STATE: dict[str, float | int | bool] = {
     "started_monotonic": time.monotonic(),
-    "streak_failures": 0,
     "total_failures": 0,
-    "slow_streak": 0,
-    "slow_total": 0,
     "disabled": False,
 }
 
 
 def reset_flex_state() -> None:
-    """Reset the Flex circuit breaker timer and failure counters."""
+    """Reset the Flex circuit breaker timer and failure counter."""
     _FLEX_STATE["started_monotonic"] = time.monotonic()
-    _FLEX_STATE["streak_failures"] = 0
     _FLEX_STATE["total_failures"] = 0
-    _FLEX_STATE["slow_streak"] = 0
-    _FLEX_STATE["slow_total"] = 0
     _FLEX_STATE["disabled"] = False
 
 
@@ -178,7 +170,14 @@ def resolve_model() -> str:
     raise RuntimeError("no usable Gemini model")
 
 
-def gemini_json(prompt: str, label: str, cache_stem: str | None = None) -> dict | None:
+def gemini_json(
+    prompt: str,
+    label: str,
+    cache_stem: str | None = None,
+    *,
+    system_instruction: str | None = None,
+    thinking_level: str | None = None,
+) -> dict | None:
     """One JSON-mode call with retries; prompt/response mirrored to .cache."""
     from google.genai import types
 
@@ -186,48 +185,32 @@ def gemini_json(prompt: str, label: str, cache_stem: str | None = None) -> dict 
         (CACHE / f"{cache_stem}.txt").write_text(prompt, encoding="utf-8")
     client = gemini_client()
     model = resolve_model()
+    eff_thinking = GEMINI_THINKING_LEVEL if thinking_level is None else thinking_level
     for attempt in range(1, MAX_CALL_RETRIES + 1):
         use_flex = attempt == 1 and _should_use_flex()
         cfg_kwargs: dict = {
             "temperature": 0.3,
             "response_mime_type": "application/json",
         }
-        if GEMINI_THINKING_LEVEL:
+        if system_instruction:
+            cfg_kwargs["system_instruction"] = system_instruction
+        if eff_thinking:
             cfg_kwargs["thinking_config"] = types.ThinkingConfig(
-                thinking_level=GEMINI_THINKING_LEVEL
+                thinking_level=eff_thinking
             )
         if use_flex:
             cfg_kwargs["service_tier"] = "flex"
             cfg_kwargs["http_options"] = types.HttpOptions(timeout=FLEX_TIMEOUT_MS)
 
         api_ok = False
-        call_started = time.monotonic()
         try:
             resp = client.models.generate_content(
                 model=model,
                 contents=prompt,
                 config=types.GenerateContentConfig(**cfg_kwargs),
             )
-            call_elapsed = time.monotonic() - call_started
             api_ok = True
             meter.record(model, resp, label=label, service_tier="flex" if use_flex else None)
-            if use_flex:
-                _FLEX_STATE["streak_failures"] = 0
-                if call_elapsed > FLEX_SLOW_THRESHOLD_SECONDS:
-                    _FLEX_STATE["slow_streak"] = int(_FLEX_STATE["slow_streak"]) + 1
-                    _FLEX_STATE["slow_total"] = int(_FLEX_STATE["slow_total"]) + 1
-                    if (
-                        int(_FLEX_STATE["slow_streak"]) >= FLEX_MAX_SLOW_STREAK
-                        or int(_FLEX_STATE["slow_total"]) >= FLEX_MAX_SLOW_TOTAL
-                    ):
-                        _FLEX_STATE["disabled"] = True
-                        log(
-                            label,
-                            f"Flex 推論の応答遅延（>{FLEX_SLOW_THRESHOLD_SECONDS:.0f}秒）が続いたため、"
-                            "残りの呼び出しを通常モード（Standard）へ切り替えます",
-                        )
-                else:
-                    _FLEX_STATE["slow_streak"] = 0
             text = (resp.text or "").strip()
             if not text:
                 raise ValueError("empty response (safety block?)")
@@ -240,14 +223,14 @@ def gemini_json(prompt: str, label: str, cache_stem: str | None = None) -> dict 
         except Exception as e:
             log(label, f"attempt {attempt}/{MAX_CALL_RETRIES} failed: {type(e).__name__}: {str(e)[:200]}")
             if use_flex and not api_ok:
-                _FLEX_STATE["streak_failures"] = int(_FLEX_STATE["streak_failures"]) + 1
                 _FLEX_STATE["total_failures"] = int(_FLEX_STATE["total_failures"]) + 1
-                if (
-                    int(_FLEX_STATE["streak_failures"]) >= FLEX_MAX_STREAK_FAILURES
-                    or int(_FLEX_STATE["total_failures"]) >= FLEX_MAX_TOTAL_FAILURES
-                ):
+                if int(_FLEX_STATE["total_failures"]) >= FLEX_MAX_TOTAL_FAILURES:
                     _FLEX_STATE["disabled"] = True
-                    log(label, "Flex 推論の失敗が閾値に達したため、残りの呼び出しを通常モード（Standard）へ切り替えます")
+                    log(
+                        label,
+                        f"Flex 推論の失敗が累計 {FLEX_MAX_TOTAL_FAILURES} 回に達したため、"
+                        "残りの呼び出しを通常モード（Standard）へ切り替えます",
+                    )
             if attempt < MAX_CALL_RETRIES:
                 time.sleep(1 if use_flex else 4 * attempt)
     return None
@@ -258,23 +241,21 @@ def gemini_json(prompt: str, label: str, cache_stem: str | None = None) -> dict 
 # ---------------------------------------------------------------------------
 
 def writing_norms() -> str:
-    """Load the writing norms verbatim, wrapped for this report's output shape."""
+    """Load the compact writing norms, falling back to full SKILL.md if absent."""
+    path = WRITING_NORMS if WRITING_NORMS.exists() else WRITING_NORMS_FALLBACK
     try:
-        text = WRITING_NORMS.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8")
     except OSError as e:
-        log("norms", f"WARNING: 文章規範を読めません（{type(e).__name__}）: {WRITING_NORMS}")
+        log("norms", f"WARNING: 文章規範を読めません（{type(e).__name__}）: {path}")
         log("norms", "WARNING: 規範なしで生成します。文体が普段より落ちます")
         return ""
     if text.startswith("---"):
         text = text.split("---", 2)[-1]
     return (
-        "\n【文章作法: japanese-tech-writing 全文】\n"
-        "以下は日本語の文章規範の全文です。日本語で書くすべての値（title_ja と summary）に、"
+        "\n【文章作法: ニュース要約規範】\n"
+        "以下は日本語の文章規範の要点です。日本語で書くすべての値（title_ja と summary）に、"
         "内容に適用できる規範をすべて適用してください。\n"
-        "ただし、あなたが書くのは JSON の値になる平文です。次の項目は適用しません: "
-        "一文ごとの改行、太字、箇条書き、脚注、コードブロック、引用ブロック、"
-        "「見出しの付け方」の節。\n"
-        "段落の数・各段落の役割・字数の指定は、この後の【出力形式】が決めます。"
+        "段落の数・各段落の役割・字数の指定は【出力形式】が決めます。"
         "規範と矛盾したら【出力形式】を優先してください。\n"
         + text.strip()
         + "\n"
@@ -301,8 +282,8 @@ Paragraph 3 - コメント欄のハイライト: Quote or closely paraphrase 3-5
 
 Paragraph 4 - 議論の温度感: Exactly one sentence capturing the overall vibe of the comment section."""
 
-AI_PROMPT = """\
-You are a Japanese tech editor specializing in AI news. For the Reddit post provided, output a single JSON object.
+AI_SYSTEM_PROMPT = """\
+You are a Japanese tech editor specializing in AI news. For the Reddit post provided in the user message, output a single JSON object.
 
 The JSON object must have exactly these fields:
 - "category": one of LLM, ImageGen, Research, Robotics, Ethics, Business, Tools, Other
@@ -317,7 +298,7 @@ Paragraph 1 - 投稿の中身: Describe what was ACTUALLY posted. If it's a new 
 
 Paragraph 2 - なぜバズっているか: Why is this trending in the AI community? Technical significance, timing relative to other announcements, competitive dynamics, community sentiment.
 
-{comment_rule}
+Paragraphs 3-4: Follow the comment-section rule given in the user message.
 
 Paragraph 5 - ポイント: One-sentence takeaway for Japanese AI practitioners, developers, or the industry. Not a restatement of paragraphs 1-4: give the one thing the reader should take away that the body has not already said.
 
@@ -331,11 +312,16 @@ Output ONLY a valid JSON object. No markdown, no explanation, no preamble.
 【出力形式】
 出力は JSON オブジェクトだけ。マークダウン記号は値の中に入れない。
 summary は 5 段落、合計 500〜700 字。段落の区切りは空行（改行 2 つ）。
-一文ごとの改行はしない。段落の数と各段落の役割は上の指定どおりにする。
+一文ごとの改行はしない。段落の数と各段落の役割は指定どおりにする。"""
+
+AI_USER_PROMPT = """\
+{comment_rule}
 
 Here is the Reddit post data:
 {post_data}
 """
+
+AI_PROMPT = AI_SYSTEM_PROMPT + "\n\n" + AI_USER_PROMPT
 
 FAIL_ENTRY = {"category": "Other", "title_ja": "(翻訳失敗)", "summary": "(要約生成失敗)"}
 
@@ -412,17 +398,21 @@ NOTE_FIXED_HASHTAGS = "#毎日note #Reddit #AI #生成AI #海外ニュース #�
 def step2_summaries(variant: str, posts: list[dict]) -> tuple[list[dict], list[dict]]:
     """Summarise AI posts in feed order. Returns (posts, summaries), aligned one to one."""
     spec = VARIANTS[variant]
-    norms = writing_norms()
+    sys_prompt = AI_SYSTEM_PROMPT.format(writing_norms=writing_norms())
     results = []
     for i, post in enumerate(posts):
         rule = WITH_COMMENT_RULE_AI if post.get("comments") else NO_COMMENT_RULE
-        prompt = AI_PROMPT.format(
+        prompt = AI_USER_PROMPT.format(
             comment_rule=rule,
             post_data=post_to_text(post),
-            writing_norms=norms,
         )
         log(spec["label"], f"Step 2: post {i + 1}/{len(posts)}: {post['title'][:55]}")
-        obj = gemini_json(prompt, spec["label"], cache_stem=f"gemini_{variant}_{i + 1}")
+        obj = gemini_json(
+            prompt,
+            spec["label"],
+            cache_stem=f"gemini_{variant}_{i + 1}",
+            system_instruction=sys_prompt,
+        )
         if not obj or not obj.get("title_ja"):
             obj = dict(FAIL_ENTRY)
         results.append(obj)
@@ -473,15 +463,25 @@ def step3_editorial(variant: str, summaries: list[dict], followup: bool) -> None
         f"Here are the {n} article titles for your reference:\n" + titles_str
     )
     log(spec["label"], "Step 3: editorial review")
-    obj = gemini_json(prompt, spec["label"], cache_stem=f"gemini_{variant}_step3") or {}
+    obj = (
+        gemini_json(
+            prompt,
+            spec["label"],
+            cache_stem=f"gemini_{variant}_step3",
+            thinking_level=GEMINI_EDITORIAL_THINKING_LEVEL,
+        )
+        or {}
+    )
     obj["_followup"] = followup
     (CACHE / f"gemini_{variant}_step3.json").write_text(
         json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
 
-def _cover_digest_text(summaries: list[dict], *, skip_failed_title: bool = False) -> str:
-    """Build concise cover prompt text (title + 1st paragraph <= 200 chars) per post."""
+def _cover_digest_text(
+    summaries: list[dict], *, skip_failed_title: bool = False, max_items: int = 6
+) -> str:
+    """Build concise cover prompt text (title + 1st paragraph <= 200 chars) for top stories."""
     items: list[str] = []
     for d in summaries:
         title = (d.get("title_ja") or "").strip()
@@ -495,13 +495,28 @@ def _cover_digest_text(summaries: list[dict], *, skip_failed_title: bool = False
             items.append(title)
         elif first_para:
             items.append(first_para)
+        if len(items) >= max_items:
+            break
     return "\n\n".join(items)
 
 
 def step3_x_cover(summaries: list[dict]) -> None:
-    """Cover image for the AI X article. Failure leaves the article without a cover."""
+    """Cover image for the AI X article. Reuses the note cover with margin padding when available."""
     out = CACHE / "gemini_ai_cover.png"
     out.unlink(missing_ok=True)
+    if os.environ.get("X_COVER", "1") == "0":
+        log("gemini-ai", "X_COVER=0 のためカバー画像を作りません")
+        return
+    note_img = CACHE / "gemini_ai_note_cover.png"
+    if note_img.exists():
+        try:
+            import note_cover
+
+            log("gemini-ai", "Step 3.5: note 表紙から X 記事のカバー画像を変換（追加画像生成なし）")
+            if note_cover.pad_cover_for_x(note_img, out):
+                return
+        except ImportError as e:
+            log("gemini-ai", f"WARNING: note_cover.py を読めないため X 単独生成へフォールバック: {e}")
     try:
         import x_cover
     except ImportError as e:
@@ -597,9 +612,11 @@ def run_variant(variant: str, skip_fetch: bool, stats: dict | None = None) -> bo
             raise RuntimeError(f"all {failed} summaries failed — not publishing a broken report")
 
         step3_editorial(variant, summaries, followup)
-        step3_x_cover(summaries)
         if not followup:
             step3_note_cover(summaries)
+        else:
+            (CACHE / "gemini_ai_note_cover.png").unlink(missing_ok=True)
+        step3_x_cover(summaries)
         step4_assemble(variant)
         return True
     except Exception as e:
@@ -616,7 +633,7 @@ HEALTH_LIMITS = {
     "ai": {"sources_floor": 10, "posts_floor": 10, "failed_ceiling": 2},
 }
 HEALTH_LABELS = {"ai": "AI"}
-HEALTH_MINUTES_CEILING = 20
+HEALTH_MINUTES_CEILING = 25
 
 
 def run_healthcheck(targets: list[str], stats: dict, ok: bool, elapsed: float) -> None:
@@ -714,6 +731,7 @@ def main() -> int:
     log(
         "gemini",
         f"using model: {model} (thinking_level={GEMINI_THINKING_LEVEL or 'default'}, "
+        f"editorial={GEMINI_EDITORIAL_THINKING_LEVEL or 'default'}, "
         f"service_tier={GEMINI_SERVICE_TIER or 'standard'})",
     )
 

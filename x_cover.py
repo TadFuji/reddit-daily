@@ -115,8 +115,9 @@ def gemini_generate_banner(scene_prompt: str) -> bytes | None:
     config = types.GenerateContentConfig(
         response_modalities=["Image"],
         image_config=types.ImageConfig(
-            aspect_ratio=BANNER_RAW_ASPECT, image_size="2K"
+            aspect_ratio=BANNER_RAW_ASPECT, image_size="1K"
         ),
+        thinking_config=types.ThinkingConfig(thinking_level="minimal"),
     )
 
     for attempt in range(1, MAX_BANNER_ATTEMPTS + 1):
@@ -127,7 +128,7 @@ def gemini_generate_banner(scene_prompt: str) -> bytes | None:
             for cand in resp.candidates or []:
                 for part in (cand.content.parts if cand.content else None) or []:
                     if getattr(part, "inline_data", None) and part.inline_data.data:
-                        meter.record_image(BANNER_MODEL, label="banner")
+                        meter.record_image(BANNER_MODEL, label="banner", image_size="1K", response=resp)
                         return crop_to_banner(part.inline_data.data)
             reason = "response contained no image data"
         except Exception as e:
