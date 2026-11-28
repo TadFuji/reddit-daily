@@ -86,10 +86,12 @@ GEMINI_THINKING_LEVEL = os.environ.get("GEMINI_THINKING_LEVEL", "LOW").strip()
 GEMINI_EDITORIAL_THINKING_LEVEL = os.environ.get("GEMINI_EDITORIAL_THINKING_LEVEL", "MEDIUM").strip()
 GEMINI_SERVICE_TIER = os.environ.get("GEMINI_SERVICE_TIER", "flex").strip().lower()
 FLEX_TIMEOUT_MS = int(os.environ.get("REDDIT_FLEX_TIMEOUT_MS", "150000"))
-FLEX_MAX_TOTAL_FAILURES = int(os.environ.get("REDDIT_FLEX_MAX_TOTAL_FAILURES", "8"))
+FLEX_COOLDOWN_STREAK = int(os.environ.get("REDDIT_FLEX_COOLDOWN_STREAK", "3"))
+FLEX_COOLDOWN_CALLS = int(os.environ.get("REDDIT_FLEX_COOLDOWN_CALLS", "3"))
+FLEX_RETRY_WAIT_SECONDS = float(os.environ.get("REDDIT_FLEX_RETRY_WAIT_SECONDS", "3"))
 FLEX_DEADLINE_SECONDS = int(os.environ.get("REDDIT_FLEX_DEADLINE_SECONDS", "1500"))
 GEMINI_FALLBACK_CANDIDATES = ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash"]
-MAX_CALL_RETRIES = 3
+MAX_CALL_RETRIES = 4
 
 VARIANTS = {
     "ai": {
@@ -116,24 +118,38 @@ _MODEL = None
 
 _FLEX_STATE: dict[str, float | int | bool] = {
     "started_monotonic": time.monotonic(),
+    "consecutive_failures": 0,
+    "cooldown_remaining": 0,
     "total_failures": 0,
     "disabled": False,
 }
 
 
 def reset_flex_state() -> None:
-    """Reset the Flex circuit breaker timer and failure counter."""
+    """Reset the Flex circuit breaker timer and failure counters."""
     _FLEX_STATE["started_monotonic"] = time.monotonic()
+    _FLEX_STATE["consecutive_failures"] = 0
+    _FLEX_STATE["cooldown_remaining"] = 0
     _FLEX_STATE["total_failures"] = 0
     _FLEX_STATE["disabled"] = False
 
 
-def _should_use_flex() -> bool:
+def _flex_deadline_ok() -> bool:
     if GEMINI_SERVICE_TIER != "flex" or _FLEX_STATE["disabled"]:
         return False
     if (time.monotonic() - float(_FLEX_STATE["started_monotonic"])) >= FLEX_DEADLINE_SECONDS:
         _FLEX_STATE["disabled"] = True
         log("gemini", "Flex 推論の許容経過時間を超えたため、残りの呼び出しを通常モード（Standard）へ切り替えます")
+        return False
+    return True
+
+
+def _consume_flex_eligibility() -> bool:
+    """Decide once per call whether Flex may be attempted (respecting deadline & cooldown)."""
+    if not _flex_deadline_ok():
+        return False
+    if int(_FLEX_STATE["cooldown_remaining"]) > 0:
+        _FLEX_STATE["cooldown_remaining"] = int(_FLEX_STATE["cooldown_remaining"]) - 1
         return False
     return True
 
@@ -186,8 +202,9 @@ def gemini_json(
     client = gemini_client()
     model = resolve_model()
     eff_thinking = GEMINI_THINKING_LEVEL if thinking_level is None else thinking_level
+    allow_flex_for_call = _consume_flex_eligibility()
     for attempt in range(1, MAX_CALL_RETRIES + 1):
-        use_flex = attempt == 1 and _should_use_flex()
+        use_flex = allow_flex_for_call and attempt <= 2 and _flex_deadline_ok()
         cfg_kwargs: dict = {
             "temperature": 0.3,
             "response_mime_type": "application/json",
@@ -210,6 +227,8 @@ def gemini_json(
                 config=types.GenerateContentConfig(**cfg_kwargs),
             )
             api_ok = True
+            if use_flex:
+                _FLEX_STATE["consecutive_failures"] = 0
             meter.record(model, resp, label=label, service_tier="flex" if use_flex else None)
             text = (resp.text or "").strip()
             if not text:
@@ -224,15 +243,19 @@ def gemini_json(
             log(label, f"attempt {attempt}/{MAX_CALL_RETRIES} failed: {type(e).__name__}: {str(e)[:200]}")
             if use_flex and not api_ok:
                 _FLEX_STATE["total_failures"] = int(_FLEX_STATE["total_failures"]) + 1
-                if int(_FLEX_STATE["total_failures"]) >= FLEX_MAX_TOTAL_FAILURES:
-                    _FLEX_STATE["disabled"] = True
-                    log(
-                        label,
-                        f"Flex 推論の失敗が累計 {FLEX_MAX_TOTAL_FAILURES} 回に達したため、"
-                        "残りの呼び出しを通常モード（Standard）へ切り替えます",
-                    )
+                if attempt == 2:
+                    _FLEX_STATE["consecutive_failures"] = int(_FLEX_STATE["consecutive_failures"]) + 1
+                    if int(_FLEX_STATE["consecutive_failures"]) >= FLEX_COOLDOWN_STREAK:
+                        _FLEX_STATE["cooldown_remaining"] = FLEX_COOLDOWN_CALLS
+                        _FLEX_STATE["consecutive_failures"] = 0
+                        log(
+                            label,
+                            f"Flex 推論の連続失敗が {FLEX_COOLDOWN_STREAK} 回に達したため、"
+                            f"次の {FLEX_COOLDOWN_CALLS} 記事を通常モード（Standard）へ一時退避してから再開します",
+                        )
             if attempt < MAX_CALL_RETRIES:
-                time.sleep(1 if use_flex else 4 * attempt)
+                wait = FLEX_RETRY_WAIT_SECONDS if use_flex else 4 * max(1, attempt - (2 if allow_flex_for_call else 0))
+                time.sleep(wait)
     return None
 
 

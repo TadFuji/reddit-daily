@@ -289,41 +289,53 @@ with genai_types_context():
         and cfg2.temperature == 0.3,
     )
 
-    # Flex 503 per-call fallback to Standard + cumulative failure breaker + Standard billing
+    # Flex 503 transient retry (2nd Flex try succeeds) + cooldown breaker & automatic recovery
     R.reset_flex_state()
     um_fb = U.UsageMeter()
     um_fb.enabled = True
     with mock.patch.object(R.time, "sleep") as mock_sleep, \
          mock.patch.object(R, "resolve_model", return_value="gemini-4-hydrogen"), \
-         mock.patch.object(R, "FLEX_MAX_TOTAL_FAILURES", 2), \
+         mock.patch.object(R, "FLEX_COOLDOWN_STREAK", 2), \
+         mock.patch.object(R, "FLEX_COOLDOWN_CALLS", 1), \
          mock.patch.object(R, "meter", um_fb):
-        fake_fb1 = FakeClient(fail_first_n=1)
-        with mock.patch.object(R, "gemini_client", return_value=fake_fb1):
-            res_fb1 = R.gemini_json("prompt", "test")
-        fake_ok_mid = FakeClient()
-        with mock.patch.object(R, "gemini_client", return_value=fake_ok_mid):
-            res_mid = R.gemini_json("prompt", "test")
-        fake_fb2 = FakeClient(fail_first_n=1)
-        with mock.patch.object(R, "gemini_client", return_value=fake_fb2):
-            res_fb2 = R.gemini_json("prompt", "test")
-        fake_after = FakeClient()
-        with mock.patch.object(R, "gemini_client", return_value=fake_after):
-            res_after = R.gemini_json("prompt", "test")
+        # 1st attempt fails 503 -> 2nd Flex attempt succeeds (stays Flex, 50% billed)
+        fake_tr = FakeClient(fail_first_n=1)
+        with mock.patch.object(R, "gemini_client", return_value=fake_tr):
+            res_tr = R.gemini_json("prompt", "test")
+        # Two consecutive calls exhaust both Flex attempts -> Standard fallback & cooldown=1
+        fake_ex1 = FakeClient(fail_first_n=2)
+        with mock.patch.object(R, "gemini_client", return_value=fake_ex1):
+            res_ex1 = R.gemini_json("prompt", "test")
+        fake_ex2 = FakeClient(fail_first_n=2)
+        with mock.patch.object(R, "gemini_client", return_value=fake_ex2):
+            res_ex2 = R.gemini_json("prompt", "test")
+        # Next call runs directly on Standard (consumes cooldown)
+        fake_cd = FakeClient()
+        with mock.patch.object(R, "gemini_client", return_value=fake_cd):
+            res_cd = R.gemini_json("prompt", "test")
+        # Following call automatically resumes Flex
+        fake_rec = FakeClient()
+        with mock.patch.object(R, "gemini_client", return_value=fake_rec):
+            res_rec = R.gemini_json("prompt", "test")
     check(
-        "Flex failure falls back to Standard for that call and disables Flex at FLEX_MAX_TOTAL_FAILURES",
-        res_fb1 == {"ok": True}
-        and res_mid == {"ok": True}
-        and res_fb2 == {"ok": True}
-        and res_after == {"ok": True}
-        and getattr(fake_fb1.models.configs[0], "service_tier", None) is not None
-        and getattr(fake_fb1.models.configs[1], "service_tier", None) is None
-        and getattr(fake_fb1.models.configs[1], "http_options", None) is None
-        and getattr(fake_ok_mid.models.configs[0], "service_tier", None) is not None
-        and R._FLEX_STATE["total_failures"] == 2
-        and R._FLEX_STATE["disabled"] is True
-        and getattr(fake_after.models.configs[0], "service_tier", None) is None
-        and mock_sleep.call_args_list == [mock.call(1), mock.call(1)]
-        and abs(um_fb.totals()["usd"] - 31.5) < 1e-6,
+        "Flex retries twice before Standard fallback, enters cooldown after streak, and recovers automatically",
+        res_tr == {"ok": True}
+        and res_ex1 == {"ok": True}
+        and res_ex2 == {"ok": True}
+        and res_cd == {"ok": True}
+        and res_rec == {"ok": True}
+        and getattr(fake_tr.models.configs[0], "service_tier", None) is not None
+        and getattr(fake_tr.models.configs[1], "service_tier", None) is not None
+        and getattr(fake_ex1.models.configs[0], "service_tier", None) is not None
+        and getattr(fake_ex1.models.configs[1], "service_tier", None) is not None
+        and getattr(fake_ex1.models.configs[2], "service_tier", None) is None
+        and getattr(fake_ex1.models.configs[2], "http_options", None) is None
+        and getattr(fake_cd.models.configs[0], "service_tier", None) is None
+        and getattr(fake_rec.models.configs[0], "service_tier", None) is not None
+        and R._FLEX_STATE["cooldown_remaining"] == 0
+        and R._FLEX_STATE["disabled"] is False
+        and len(mock_sleep.call_args_list) == 5
+        and abs(um_fb.totals()["usd"] - 36.0) < 1e-6,
     )
 
     # Deadline circuit breaker
@@ -341,26 +353,10 @@ with genai_types_context():
         and getattr(fake_dl.models.configs[0], "service_tier", None) is None,
     )
 
-    # Default FLEX_MAX_TOTAL_FAILURES = 8 allows occasional blips without killing Flex
-    R.reset_flex_state()
-    with mock.patch.object(R.time, "sleep"), \
-         mock.patch.object(R, "resolve_model", return_value="gemini-4-hydrogen"), \
-         mock.patch.object(R, "meter", mock.Mock()):
-        for _ in range(7):
-            with mock.patch.object(R, "gemini_client", return_value=FakeClient(fail_first_n=1)):
-                R.gemini_json("prompt", "test")
-        assert R._FLEX_STATE["disabled"] is False
-        with mock.patch.object(R, "gemini_client", return_value=FakeClient(fail_first_n=1)):
-            R.gemini_json("prompt", "test")
-        fake_total_after = FakeClient()
-        with mock.patch.object(R, "gemini_client", return_value=fake_total_after):
-            R.gemini_json("prompt", "test")
+    # Default cooldown constants
     check(
-        "FLEX_MAX_TOTAL_FAILURES=8 disables Flex after 8 failures",
-        R.FLEX_MAX_TOTAL_FAILURES == 8
-        and R._FLEX_STATE["total_failures"] == 8
-        and R._FLEX_STATE["disabled"] is True
-        and getattr(fake_total_after.models.configs[0], "service_tier", None) is None,
+        "Default FLEX_COOLDOWN_STREAK=3 and FLEX_COOLDOWN_CALLS=3",
+        R.FLEX_COOLDOWN_STREAK == 3 and R.FLEX_COOLDOWN_CALLS == 3 and R.MAX_CALL_RETRIES == 4,
     )
 
     # GEMINI_SERVICE_TIER="standard" disables Flex from the start
